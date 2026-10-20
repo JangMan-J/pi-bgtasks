@@ -39,7 +39,10 @@ function mockCtx(cwd: string, o: { idle?: boolean; ui?: boolean } = {}) {
 		ui: { setStatus: (k: string, v?: string) => void (status[k] = v) },
 		status,
 		model: { provider: "p", id: "m" },
-		modelRegistry: { find: () => undefined, getAvailable: () => [] },
+		modelRegistry: {
+			find: (p: string, i: string) => (p === "p" && i === "m" ? { provider: "p", id: "m" } : undefined),
+			getAvailable: () => [{ provider: "p", id: "m" }],
+		},
 	} as any;
 }
 const until = async (f: () => boolean, ms = 5000) => {
@@ -58,7 +61,7 @@ afterEach(async () => {
 });
 
 describe("declarations", () => {
-	const ok = "---\ndescription: Reads code\ntools: read, grep\nmodel: inherit\n---\nYou read.";
+	const ok = "---\ndescription: Reads code\ntools: read, grep\nmodel: p/m\n---\nYou read.";
 	it("parses a complete declaration", () => {
 		const d = agents.parseDeclaration("reader", ok) as agents.Declaration;
 		assert.deepEqual(d.tools, ["read", "grep"]);
@@ -66,11 +69,11 @@ describe("declarations", () => {
 		assert.equal(d.systemPrompt, "You read.");
 	});
 	for (const [why, text, name] of [
-		["missing model", ok.replace("model: inherit\n", ""), "a"],
+		["missing model", ok.replace("model: p/m\n", ""), "a"],
 		["missing tools", ok.replace("tools: read, grep\n", ""), "a"],
 		["empty prompt", ok.replace("You read.", ""), "a"],
 		["unknown key", ok.replace("---\nYou", "extra: 1\n---\nYou"), "a"],
-		["bad model", ok.replace("inherit", "gpt"), "a"],
+		["bad model", ok.replace("p/m", "gpt"), "a"],
 		["bad thinking", ok.replace("model:", "thinking: loud\nmodel:"), "a"],
 		["own tool", ok.replace("read, grep", "read, bg_run"), "a"],
 		["bad name", ok, "bad name"],
@@ -176,7 +179,7 @@ describe("shell tasks", () => {
 });
 
 describe("subagents", () => {
-	const decl: agents.Declaration = { name: "reader", description: "d", tools: ["read"], model: "inherit", maxTurns: 2, systemPrompt: "p" };
+	const decl: agents.Declaration = { name: "reader", description: "d", tools: ["read"], model: "p/m", maxTurns: 2, systemPrompt: "p" };
 	function fakeSession(script: (emit: (e: any) => void) => Promise<void> | void, text = "answer") {
 		let fn: any;
 		const s = {
@@ -261,13 +264,13 @@ describe("subagents", () => {
 		for (let i = 0; i < agents.MAX_RUNNING; i++) await agents.spawn(mockCtx(tmp()), decl, { prompt: "go", background: true });
 		await assert.rejects(agents.spawn(mockCtx(tmp()), decl, { prompt: "go", background: true }), /Too many/);
 	});
-	it("refuses an undeclared model instead of inheriting", async () => {
+	it("refuses a model that does not exist", async () => {
 		await assert.rejects(agents.spawn(mockCtx(tmp()), { ...decl, model: "x/y" }, { prompt: "go", background: false }), /does not exist/);
 	});
 });
 
 describe("results the caller can trust", () => {
-	const decl: agents.Declaration = { name: "reader", description: "d", tools: ["read"], model: "inherit", maxTurns: 5, systemPrompt: "p" };
+	const decl: agents.Declaration = { name: "reader", description: "d", tools: ["read"], model: "p/m", maxTurns: 5, systemPrompt: "p" };
 	function session(script: (emit: (e: any) => void) => void, last?: string) {
 		let fn: any;
 		return {
@@ -350,9 +353,9 @@ describe("auto-created default agents", () => {
 
 	it("creates a read-only default, saves it, and says so", async () => {
 		const { dir, pi, created, ctx } = setup();
-		const res = await call(pi, ctx, { agent: "scout" });
+		const res = await call(pi, ctx, { agent: "scout", model: "p/m" });
 		assert.deepEqual(created[0].tools, agents.SAFE_TOOLS);
-		assert.equal(created[0].model, "inherit");
+		assert.equal(created[0].model, "p/m");
 		const file = join(dir, "agents", "scout.md");
 		assert.ok(existsSync(file));
 		assert.match(res.content[0].text, /was not declared[\s\S]*created at .*scout\.md/);
@@ -362,6 +365,12 @@ describe("auto-created default agents", () => {
 		assert.doesNotMatch(again.content[0].text, /was not declared/);
 		assert.match(readFileSync(file, "utf8"), /Edited/);
 	});
+	it("requires a model to create an agent and never inherits one", async () => {
+		const { dir, pi, ctx } = setup();
+		await assert.rejects(call(pi, ctx, { agent: "scout" }), /pass model as provider\/id\. Available: p\/m/);
+		await assert.rejects(call(pi, ctx, { agent: "scout", model: "inherit" }), /Cannot create agent/);
+		assert.equal(existsSync(join(dir, "agents")), false);
+	});
 	it("does not save a default whose model is unusable", async () => {
 		const { dir, pi, ctx } = setup();
 		await assert.rejects(call(pi, ctx, { agent: "ghost", model: "x/y" }), /does not exist/);
@@ -369,7 +378,7 @@ describe("auto-created default agents", () => {
 	});
 	it("rejects bad names and models without writing", async () => {
 		const { dir, pi, ctx } = setup();
-		await assert.rejects(call(pi, ctx, { agent: "../evil" }), /Cannot create agent/);
+		await assert.rejects(call(pi, ctx, { agent: "../evil", model: "p/m" }), /Cannot create agent/);
 		await assert.rejects(call(pi, ctx, { agent: "ok", model: "not a model" }), /Cannot create agent/);
 		assert.equal(existsSync(join(dir, "agents")), false);
 	});
@@ -379,7 +388,7 @@ describe("auto-created default agents", () => {
 		writeFileSync(join(dir, "agents", "broken.md"), "nope");
 		await assert.rejects(call(pi, ctx, { agent: "broken" }), /invalid declaration/);
 		assert.equal(readFileSync(join(dir, "agents", "broken.md"), "utf8"), "nope");
-		await call(pi, ctx, { agent: "fine" });
+		await call(pi, ctx, { agent: "fine", model: "p/m" });
 		await assert.rejects(call(pi, ctx, { agent: "fine", model: "a/b" }), /only applies to a new agent/);
 	});
 });

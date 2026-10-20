@@ -19,7 +19,7 @@ A subagent exists only if a file declares all of it. Files: `<cwd>/.pi/agents/<n
 ---
 description: Reads code and reports findings
 tools: read, grep, find, ls
-model: inherit
+model: provider/model-id
 thinking: high
 max_turns: 20
 ---
@@ -30,14 +30,14 @@ You read code and report what you find. Do not edit files.
 | --- | --- | --- |
 | `description` | yes | One line, shown to the parent model. |
 | `tools` | yes | Exact allowlist: names or `*` patterns, comma list or `[a, b]`. `none` means no tools. |
-| `model` | yes | `provider/id`, or `inherit` to use the parent's model on purpose. |
+| `model` | yes | Explicit `provider/id`. Models are never inherited; `inherit` is invalid. |
 | `thinking` | no | `off minimal low medium high xhigh max`. |
 | `max_turns` | no | 1-500, default 30. Reaching it fails the run and keeps the partial result. |
 | body | yes | The whole system prompt. No parent prompt, context files, skills, or conversation is inherited. |
 
 ### Undeclared names
 
-Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, a prompt that demands a written final answer. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The optional `model` parameter (`provider/id`) picks its model, else it inherits the current one. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
+Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, a prompt that demands a written final answer. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter (`provider/id`) is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
 
 Parsing is strict. An unknown key, a missing field, or a bad value makes that file invalid; it is not spawnable and the error is shown when the model asks for it. An invalid project file does not fall back to the global one it shadows.
 

@@ -22,7 +22,7 @@ export interface Declaration {
 	description: string;
 	/** Exact tool allowlist (names or `*` patterns). Empty means no tools. */
 	tools: string[];
-	/** `provider/id`, or the literal `inherit` for the parent's model. */
+	/** Always an explicit `provider/id`. Models are never inherited from the parent. */
 	model: string;
 	thinking?: (typeof THINKING)[number];
 	maxTurns: number;
@@ -66,7 +66,7 @@ export function parseDeclaration(name: string, text: string): Declaration | stri
 	}
 
 	const model = scalar(fm.get("model")!);
-	if (model !== "inherit" && !/^[^\s/]+\/\S+$/.test(model)) return `model must be "provider/id" or "inherit": ${oneLine(model)}`;
+	if (!/^[^\s/]+\/\S+$/.test(model)) return `model must be an explicit "provider/id" (inheriting the parent's model is not supported): ${oneLine(model)}`;
 
 	let thinking: Declaration["thinking"];
 	if (fm.has("thinking")) {
@@ -248,10 +248,6 @@ let factory: Factory = sdkFactory;
 export const setFactory = (f: Factory | undefined) => void (factory = f ?? sdkFactory);
 
 export function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; label: string } {
-	if (d.model === "inherit") {
-		if (!ctx.model) throw new Error(`Agent "${d.name}" inherits the parent model, but none is selected`);
-		return { model: ctx.model, label: `${ctx.model.provider}/${ctx.model.id}` };
-	}
 	const i = d.model.indexOf("/");
 	const model = ctx.modelRegistry.find(d.model.slice(0, i), d.model.slice(i + 1));
 	if (!model) throw new Error(`Agent "${d.name}": model ${d.model} does not exist`);
