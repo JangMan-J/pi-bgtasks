@@ -24,7 +24,7 @@ function subagentDescription(cwd: string): string {
 	const list = [...declared.values()].map((d) => `- ${d.name}: ${d.description}`).join("\n") || "(none declared)";
 	return [
 		"Run a declared subagent in-process. Each agent is declared in .pi/agents/*.md or ~/.pi/agent/agents/*.md with its own prompt, tools and model.",
-		"An undeclared name creates a read-only default agent (tools: read, grep, find, ls) and saves it as a declaration; `model` (provider/id) is then required: models are never inherited.",
+		"An undeclared name creates a read-only default agent (tools: read, grep, find, ls) and saves it as a declaration; `model` is then required (provider/id, or a bare model id, which prefers a subscription provider): models are never inherited.",
 		"Foreground (default) returns a report: status, model, turns, tool calls, then the answer, or an explicit NO RESULT / FAILED / KILLED notice. background: true returns a task id and wakes a follow-up turn with the same report; bg_logs lists unread results.",
 		`Declared agents:\n${list}`,
 		...(errors.length ? [`${errors.length} invalid declaration(s) ignored.`] : []),
@@ -156,7 +156,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 				agent: Type.String({ description: "Name of a declared agent, or a new name to create a read-only default." }),
 				prompt: Type.String({ description: "Complete, self-contained task. The subagent sees nothing else." }),
 				description: Type.Optional(Type.String({ description: "Short label for status display." })),
-				model: Type.Optional(Type.String({ description: "provider/id. Required when creating a new agent; not allowed for a declared one." })),
+				model: Type.Optional(Type.String({ description: "provider/id, or a model id (prefers a subscription provider). Required when creating a new agent; not allowed for a declared one." })),
 				background: Type.Optional(Type.Boolean({ description: "Return a task id now and wake on completion (default false)." })),
 			}),
 			async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
@@ -170,7 +170,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 					}
 					if (!p.model?.trim()) {
 						const some = ctx.modelRegistry.getAvailable().slice(0, 20).map((m) => `${m.provider}/${m.id}`).join(", ");
-						throw new Error(`Agent "${oneLine(String(p.agent ?? ""))}" is not declared. To create it, pass model as provider/id. Available: ${some || "none"}.`);
+						throw new Error(`Agent "${oneLine(String(p.agent ?? ""))}" is not declared. To create it, pass model (provider/id or model id). Available: ${some || "none"}.`);
 					}
 					const made = agents.defaultDeclaration(String(p.agent ?? ""), p.model.trim());
 					d = made.decl;

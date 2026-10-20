@@ -22,7 +22,7 @@ export interface Declaration {
 	description: string;
 	/** Exact tool allowlist (names or `*` patterns). Empty means no tools. */
 	tools: string[];
-	/** Always an explicit `provider/id`. Models are never inherited from the parent. */
+	/** `provider/id` (exact), or a bare model id resolved by `resolveModel`. Never inherited from the parent. */
 	model: string;
 	thinking?: (typeof THINKING)[number];
 	maxTurns: number;
@@ -66,7 +66,9 @@ export function parseDeclaration(name: string, text: string): Declaration | stri
 	}
 
 	const model = scalar(fm.get("model")!);
-	if (!/^[^\s/]+\/\S+$/.test(model)) return `model must be an explicit "provider/id" (inheriting the parent's model is not supported): ${oneLine(model)}`;
+	if (!/^\S+$/.test(model) || model.toLowerCase() === "inherit") {
+		return `model must name a model ("provider/id" or a model id); inheriting the parent's model is not supported: ${oneLine(model)}`;
+	}
 
 	let thinking: Declaration["thinking"];
 	if (fm.has("thinking")) {
@@ -247,14 +249,42 @@ export const sdkFactory: Factory = {
 let factory: Factory = sdkFactory;
 export const setFactory = (f: Factory | undefined) => void (factory = f ?? sdkFactory);
 
-export function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; label: string } {
-	const i = d.model.indexOf("/");
-	const model = ctx.modelRegistry.find(d.model.slice(0, i), d.model.slice(i + 1));
-	if (!model) throw new Error(`Agent "${d.name}": model ${d.model} does not exist`);
-	if (!ctx.modelRegistry.getAvailable().some((m) => m.provider === model.provider && m.id === model.id)) {
-		throw new Error(`Agent "${d.name}": model ${d.model} has no configured credentials`);
+/** 2 = subscription-backed, 1 = OAuth, 0 = API key or other. Pi holds this data; the registry exposes only the OAuth half. */
+function rank(ctx: ExtensionContext, m: { provider: string }): number {
+	const reg: any = ctx.modelRegistry;
+	try {
+		if (reg.runtime?.isUsingSubscription?.(m.provider)) return 2;
+		return reg.isUsingOAuth?.(m) ? 1 : 0;
+	} catch {
+		return 0;
 	}
-	return { model, label: d.model };
+}
+
+/**
+ * `provider/id` is exact. A bare model id is looked up across every provider with
+ * credentials and takes the subscription-backed one; if the best tier still
+ * offers it through several providers, that is an error, not a guess.
+ */
+export function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; label: string } {
+	const reg = ctx.modelRegistry;
+	const available = reg.getAvailable();
+	const usable = (m: { provider: string; id: string }) => available.some((a) => a.provider === m.provider && a.id === m.id);
+	const i = d.model.indexOf("/");
+	const exact = i > 0 ? reg.find(d.model.slice(0, i), d.model.slice(i + 1)) : undefined;
+	if (exact) {
+		if (!usable(exact)) throw new Error(`Agent "${d.name}": model ${d.model} has no configured credentials`);
+		return { model: exact, label: `${exact.provider}/${exact.id}` };
+	}
+	const named = reg.getAll().filter((m) => m.id === d.model);
+	if (named.length === 0) throw new Error(`Agent "${d.name}": model ${d.model} does not exist`);
+	const ready = named.filter(usable);
+	if (ready.length === 0) throw new Error(`Agent "${d.name}": model ${d.model} has no configured credentials`);
+	const best = Math.max(...ready.map((m) => rank(ctx, m)));
+	const top = ready.filter((m) => rank(ctx, m) === best);
+	if (top.length > 1) {
+		throw new Error(`Agent "${d.name}": model ${d.model} is ambiguous (${top.map((m) => `${m.provider}/${m.id}`).join(", ")}); use provider/id`);
+	}
+	return { model: top[0], label: `${top[0].provider}/${top[0].id}` };
 }
 
 /**

@@ -41,6 +41,7 @@ function mockCtx(cwd: string, o: { idle?: boolean; ui?: boolean } = {}) {
 		model: { provider: "p", id: "m" },
 		modelRegistry: {
 			find: (p: string, i: string) => (p === "p" && i === "m" ? { provider: "p", id: "m" } : undefined),
+			getAll: () => [{ provider: "p", id: "m" }],
 			getAvailable: () => [{ provider: "p", id: "m" }],
 		},
 	} as any;
@@ -73,7 +74,7 @@ describe("declarations", () => {
 		["missing tools", ok.replace("tools: read, grep\n", ""), "a"],
 		["empty prompt", ok.replace("You read.", ""), "a"],
 		["unknown key", ok.replace("---\nYou", "extra: 1\n---\nYou"), "a"],
-		["bad model", ok.replace("p/m", "gpt"), "a"],
+		["bad model", ok.replace("p/m", "two words"), "a"],
 		["bad thinking", ok.replace("model:", "thinking: loud\nmodel:"), "a"],
 		["own tool", ok.replace("read, grep", "read, bg_run"), "a"],
 		["bad name", ok, "bad name"],
@@ -367,7 +368,7 @@ describe("auto-created default agents", () => {
 	});
 	it("requires a model to create an agent and never inherits one", async () => {
 		const { dir, pi, ctx } = setup();
-		await assert.rejects(call(pi, ctx, { agent: "scout" }), /pass model as provider\/id\. Available: p\/m/);
+		await assert.rejects(call(pi, ctx, { agent: "scout" }), /pass model \(provider\/id or model id\)\. Available: p\/m/);
 		await assert.rejects(call(pi, ctx, { agent: "scout", model: "inherit" }), /Cannot create agent/);
 		assert.equal(existsSync(join(dir, "agents")), false);
 	});
@@ -390,6 +391,50 @@ describe("auto-created default agents", () => {
 		assert.equal(readFileSync(join(dir, "agents", "broken.md"), "utf8"), "nope");
 		await call(pi, ctx, { agent: "fine", model: "p/m" });
 		await assert.rejects(call(pi, ctx, { agent: "fine", model: "a/b" }), /only applies to a new agent/);
+	});
+});
+
+describe("provider choice", () => {
+	function ctxWith(models: Array<[string, string, number]>) {
+		const all = models.map(([provider, id]) => ({ provider, id }));
+		const tier = new Map(models.map(([p, , t]) => [p, t]));
+		return {
+			modelRegistry: {
+				find: (p: string, i: string) => all.find((m) => m.provider === p && m.id === i),
+				getAll: () => all,
+				getAvailable: () => all.filter(() => true),
+				isUsingOAuth: (m: any) => (tier.get(m.provider) ?? 0) >= 1,
+				runtime: { isUsingSubscription: (p: string) => tier.get(p) === 2 },
+			},
+		} as any;
+	}
+	const d = (model: string): agents.Declaration => ({ name: "a", description: "d", tools: [], model, maxTurns: 1, systemPrompt: "p" });
+
+	it("a bare id prefers the subscription provider", () => {
+		const ctx = ctxWith([["api", "m", 0], ["sub", "m", 2], ["oauth", "m", 1]]);
+		assert.equal(agents.resolveModel(ctx, d("m")).label, "sub/m");
+	});
+	it("OAuth beats API key when the runtime hides subscription data", () => {
+		const ctx = ctxWith([["api", "m", 0], ["oauth", "m", 1]]);
+		assert.equal(agents.resolveModel(ctx, d("m")).label, "oauth/m");
+	});
+	it("provider/id is never swapped", () => {
+		const ctx = ctxWith([["api", "m", 0], ["sub", "m", 2]]);
+		assert.equal(agents.resolveModel(ctx, d("api/m")).label, "api/m");
+	});
+	it("a tie at the best tier is an error, not a guess", () => {
+		const ctx = ctxWith([["a", "m", 0], ["b", "m", 0]]);
+		assert.throws(() => agents.resolveModel(ctx, d("m")), /ambiguous \(a\/m, b\/m\)/);
+	});
+	it("a single provider works; an unknown id fails", () => {
+		const ctx = ctxWith([["api", "m", 0]]);
+		assert.equal(agents.resolveModel(ctx, d("m")).label, "api/m");
+		assert.throws(() => agents.resolveModel(ctx, d("zzz")), /does not exist/);
+	});
+	it("a bare id with a subscription lacking credentials falls to what is usable", () => {
+		const ctx = ctxWith([["api", "m", 0], ["sub", "m", 2]]);
+		ctx.modelRegistry.getAvailable = () => [{ provider: "api", id: "m" }];
+		assert.equal(agents.resolveModel(ctx, d("m")).label, "api/m");
 	});
 });
 

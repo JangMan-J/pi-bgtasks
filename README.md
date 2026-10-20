@@ -30,18 +30,22 @@ You read code and report what you find. Do not edit files.
 | --- | --- | --- |
 | `description` | yes | One line, shown to the parent model. |
 | `tools` | yes | Exact allowlist: names or `*` patterns, comma list or `[a, b]`. `none` means no tools. |
-| `model` | yes | Explicit `provider/id`. Models are never inherited; `inherit` is invalid. |
+| `model` | yes | `provider/id` (exact), or a bare model id, resolved as below. Never inherited; `inherit` is invalid. |
 | `thinking` | no | `off minimal low medium high xhigh max`. |
 | `max_turns` | no | 1-500, default 30. Reaching it fails the run and keeps the partial result. |
 | body | yes | The whole system prompt. No parent prompt, context files, skills, or conversation is inherited. |
 
 ### Undeclared names
 
-Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, a prompt that demands a written final answer. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter (`provider/id`) is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
+Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, a prompt that demands a written final answer. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
 
 Parsing is strict. An unknown key, a missing field, or a bad value makes that file invalid; it is not spawnable and the error is shown when the model asks for it. An invalid project file does not fall back to the global one it shadows.
 
 A child never receives this extension's tools (`subagent`, `bg_*`), even through a `*` pattern. A declaration that names them is invalid.
+
+## Choosing a provider
+
+`provider/id` is used exactly as written; it is never swapped for another route. A bare model id (no provider) is looked up across every provider that has credentials and resolves to the subscription-backed one, using Pi's own auth data (`isUsingSubscription`, falling back to OAuth when the runtime does not expose it). Two providers tied at the best tier is an error that lists them; Pi never guesses between them. The resolved `provider/id` appears in every report header.
 
 ## What the caller gets
 
