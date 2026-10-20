@@ -47,7 +47,7 @@ export function emit(event: string, payload: unknown): void {
 }
 
 export function notification(
-	tag: "background-task-notification" | "subagent-notification",
+	tag: "background-task-notification",
 	fields: Record<string, string | number | null>,
 	bodyTag: string,
 	body: string,

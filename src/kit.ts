@@ -27,6 +27,11 @@ export const Type = {
 	},
 };
 
+/** Status plus whether the caller has read a finished result yet. */
+export function stateLabel(j: { status: Status; resultObservedAt?: number | null }): string {
+	return j.status !== "running" && !j.resultObservedAt ? `${j.status}, unread` : j.status;
+}
+
 export function newId(taken: (id: string) => boolean): string {
 	for (;;) {
 		const id = randomBytes(3).toString("hex");

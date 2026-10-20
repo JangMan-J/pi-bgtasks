@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { emit, host, notification, publish, taken, terminal } from "./host.ts";
-import { duration, newId, oneLine, readTail, type Status } from "./kit.ts";
+import { duration, newId, oneLine, readTail, stateLabel, type Status } from "./kit.ts";
 
 // Wire protocol v1: other extensions read these without importing this package.
 export const TASKS_KEY = Symbol.for("jang.pi.bg.tasks.v1");
@@ -104,7 +104,7 @@ if (!g[Symbol.for("jang.pi.bg.exit.v1")]) {
 export function summary(t: ShellTask | ShellSnapshot): string {
 	const took = duration((t.completedAt ?? Date.now()) - t.startedAt);
 	const how = t.status === "running" ? `PID ${t.pid ?? "?"}` : t.signal ? `signal ${t.signal}` : `exit ${t.exitCode ?? "?"}`;
-	return `${t.id}  [${t.status}]  ${t.name} (${how}, ${took})\n    cmd: ${oneLine(t.command, 200)}\n    log: ${t.logPath}`;
+	return `${t.id}  [${stateLabel(t)}]  ${t.name} (${how}, ${took})\n    cmd: ${oneLine(t.command, 200)}\n    log: ${t.logPath}`;
 }
 
 function message(t: ShellTask) {

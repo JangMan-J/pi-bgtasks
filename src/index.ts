@@ -23,8 +23,9 @@ function subagentDescription(cwd: string): string {
 	const { agents: declared, errors } = agents.loadDeclarations(cwd);
 	const list = [...declared.values()].map((d) => `- ${d.name}: ${d.description}`).join("\n") || "(none declared)";
 	return [
-		"Run a declared subagent in-process. Only agents declared in .pi/agents/*.md or ~/.pi/agent/agents/*.md exist; each has its own prompt, tools and model.",
-		"Foreground (default) returns the result. background: true returns a task id and wakes a follow-up turn on completion; read it with bg_logs.",
+		"Run a declared subagent in-process. Each agent is declared in .pi/agents/*.md or ~/.pi/agent/agents/*.md with its own prompt, tools and model.",
+		"An undeclared name creates a read-only default agent (tools: read, grep, find, ls) and saves it as a declaration; pass `model` (provider/id) to choose its model, else it uses the current one.",
+		"Foreground (default) returns a report: status, model, turns, tool calls, then the answer, or an explicit NO RESULT / FAILED / KILLED notice. background: true returns a task id and wakes a follow-up turn with the same report; bg_logs lists unread results.",
 		`Declared agents:\n${list}`,
 		...(errors.length ? [`${errors.length} invalid declaration(s) ignored.`] : []),
 	].join("\n");
@@ -122,7 +123,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 				return text(`${shell.summary(task)}\n\n--- Output tail (${tail.totalBytes} bytes total${tail.truncated ? ", truncated" : ""}) ---\n${tail.text}`);
 			}
 			observed(agent!);
-			return text(`${agents.summary(agent!)}\n\n${agent!.result || "(no result yet)"}`);
+			return text(agents.report(agent!));
 		},
 	} as any);
 
@@ -152,29 +153,40 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 			description,
 			promptSnippet: "Run a declared in-process subagent, in the foreground or background.",
 			parameters: Type.Object({
-				agent: Type.String({ description: "Name of a declared agent." }),
+				agent: Type.String({ description: "Name of a declared agent, or a new name to create a read-only default." }),
 				prompt: Type.String({ description: "Complete, self-contained task. The subagent sees nothing else." }),
 				description: Type.Optional(Type.String({ description: "Short label for status display." })),
+				model: Type.Optional(Type.String({ description: "provider/id for a newly created agent. Not allowed for a declared agent." })),
 				background: Type.Optional(Type.Boolean({ description: "Return a task id now and wake on completion (default false)." })),
 			}),
 			async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
 				bind(ctx);
-				const { agents: declared, errors } = agents.loadDeclarations(ctx.cwd);
-				const d = declared.get(p.agent);
+				const { agents: declared, errors, invalid } = agents.loadDeclarations(ctx.cwd);
+				let d = declared.get(p.agent);
+				let note: string | undefined;
 				if (!d) {
-					throw new Error(
-						`Unknown agent "${p.agent}". Declared: ${[...declared.keys()].join(", ") || "none"}.` +
-							(errors.length ? `\nInvalid declarations:\n${errors.join("\n")}` : ""),
-					);
+					if (invalid.has(p.agent)) {
+						throw new Error(`Agent "${p.agent}" has an invalid declaration; fix it:\n${errors.filter((e) => e.includes(`${p.agent}.md:`)).join("\n")}`);
+					}
+					const made = agents.defaultDeclaration(String(p.agent ?? ""), p.model?.trim() || "inherit");
+					d = made.decl;
+					agents.resolveModel(ctx, d); // fail before saving anything
+					const path = agents.saveDeclaration(ctx.cwd, d.name, made.text);
+					note = `Note: "${d.name}" was not declared, so a read-only default agent (${agents.SAFE_TOOLS.join(", ")}; model ${d.model}) was ${
+						path ? `created at ${path}. Edit it to customize.` : "used for this run only (could not save it)."
+					}`;
+				} else if (p.model) {
+					throw new Error(`Agent "${d.name}" is declared with model ${d.model}; the model parameter only applies to a new agent.`);
 				}
-				const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, signal });
-				if (r.background) return text(`Started subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).\nCompletion will wake a follow-up turn; read it with bg_logs.`, { id: r.id });
+				const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, signal, note });
+				if (r.background) {
+					return text(`Started subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).${note ? `\n${note}` : ""}\nCompletion will wake a follow-up turn with its report; bg_logs shows unread results.`, { id: r.id });
+				}
 				await r.done;
 				r.resultObservedAt ??= Date.now();
-				if (r.status !== "completed") {
-					throw new Error(`Subagent ${r.id} ${r.status}${r.error ? `: ${r.error}` : ""}${r.result ? `\nPartial result:\n${r.result}` : ""}`);
-				}
-				return text(r.result || "(subagent finished with no output)", { id: r.id, turns: r.turns, model: r.model });
+				const out = agents.report(r);
+				if (r.status !== "completed") throw new Error(out);
+				return text(out, { id: r.id, turns: r.turns, toolCalls: r.toolCalls, model: r.model });
 			},
 		} as any);
 	}

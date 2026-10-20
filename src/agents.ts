@@ -1,9 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { emit, host, notification, publish, taken, terminal } from "./host.ts";
-import { duration, newId, oneLine, type Status } from "./kit.ts";
+import { emit, host, publish, taken, terminal } from "./host.ts";
+import { duration, escapeXml, newId, oneLine, stateLabel, type Status } from "./kit.ts";
 
 // ---------------------------------------------------------------------------
 // Declarations: a subagent exists only if a file declares it completely.
@@ -89,9 +89,10 @@ export function agentDirs(cwd: string): string[] {
 }
 
 /** Read declarations from disk on every call so edits apply without a reload. */
-export function loadDeclarations(cwd: string): { agents: Map<string, Declaration>; errors: string[] } {
+export function loadDeclarations(cwd: string): { agents: Map<string, Declaration>; errors: string[]; invalid: Set<string> } {
 	const agents = new Map<string, Declaration>();
 	const errors: string[] = [];
+	const invalid = new Set<string>();
 	for (const dir of agentDirs(cwd)) {
 		if (!existsSync(dir)) continue;
 		let files: string[] = [];
@@ -106,14 +107,54 @@ export function loadDeclarations(cwd: string): { agents: Map<string, Declaration
 				const d = parseDeclaration(name, readFileSync(join(dir, f), "utf8"));
 				if (typeof d === "string") {
 					agents.delete(name); // a broken override must not fall back to the file it shadows
+					invalid.add(name);
 					errors.push(`${join(dir, f)}: ${d}`);
 				} else agents.set(name, d);
 			} catch (e) {
+				invalid.add(name);
 				errors.push(`${join(dir, f)}: ${e instanceof Error ? e.message : e}`);
 			}
 		}
 	}
-	return { agents, errors };
+	return { agents, errors, invalid };
+}
+
+/** Tools of an auto-created agent: read-only. */
+export const SAFE_TOOLS = ["read", "grep", "find", "ls"];
+
+/**
+ * An undeclared agent name gets a safe default: read-only tools and a prompt that
+ * demands a written final answer. It is written to the global agents directory so
+ * it becomes a real, editable declaration; an existing file is never overwritten.
+ */
+export function defaultDeclaration(name: string, model: string): { decl: Declaration; text: string } {
+	const text = [
+		"---",
+		"description: Auto-created read-only default agent",
+		`tools: ${SAFE_TOOLS.join(", ")}`,
+		`model: ${model}`,
+		`max_turns: ${DEFAULT_MAX_TURNS}`,
+		"---",
+		"You are a read-only research subagent. Use only your tools to investigate the task; you cannot edit files or run commands.",
+		"Your final message is the only thing the caller receives: put your complete findings in it. If you could not find or finish something, say so plainly.",
+		"",
+	].join("\n");
+	const decl = parseDeclaration(name, text);
+	if (typeof decl === "string") throw new Error(`Cannot create agent "${oneLine(name)}": ${decl}`);
+	return { decl, text };
+}
+
+/** Save a default as a real declaration. Never overwrites; null when it could not be saved. */
+export function saveDeclaration(cwd: string, name: string, text: string): string | null {
+	try {
+		const dir = agentDirs(cwd)[0];
+		mkdirSync(dir, { recursive: true });
+		const path = join(dir, `${name}.md`);
+		writeFileSync(path, text, { flag: "wx", mode: 0o644 });
+		return path;
+	} catch {
+		return null;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +175,12 @@ export interface AgentRun {
 	startedAt: number;
 	completedAt: number | null;
 	turns: number;
+	toolCalls: number;
 	result: string;
+	/** Length of the full final answer before the cap. */
+	resultChars: number;
+	/** Set when this run auto-created its agent declaration. */
+	note: string | null;
 	error: string | null;
 	notifyOnCompletion: boolean;
 	resultObservedAt: number | null;
@@ -201,7 +247,7 @@ export const sdkFactory: Factory = {
 let factory: Factory = sdkFactory;
 export const setFactory = (f: Factory | undefined) => void (factory = f ?? sdkFactory);
 
-function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; label: string } {
+export function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; label: string } {
 	if (d.model === "inherit") {
 		if (!ctx.model) throw new Error(`Agent "${d.name}" inherits the parent model, but none is selected`);
 		return { model: ctx.model, label: `${ctx.model.provider}/${ctx.model.id}` };
@@ -215,24 +261,39 @@ function resolveModel(ctx: ExtensionContext, d: Declaration): { model: any; labe
 	return { model, label: d.model };
 }
 
+/**
+ * What the caller reads, for every outcome. Always a header, then either the
+ * answer or an explicit statement that there is none and why.
+ */
+export function report(r: AgentRun | AgentSnapshot, max = MAX_RESULT): string {
+	const took = duration((r.completedAt ?? Date.now()) - r.startedAt);
+	const lines = [
+		`subagent ${r.id} (${r.agent}: ${r.name}) ${stateLabel(r).toUpperCase()}`,
+		`${r.model} · ${r.turns} turn${r.turns === 1 ? "" : "s"} · ${r.toolCalls} tool call${r.toolCalls === 1 ? "" : "s"} · ${took}`,
+	];
+	if (r.note) lines.push(r.note);
+	if (r.status === "running") lines.push("", "Still running; no result yet.");
+	else {
+		const answer = r.result.slice(0, max);
+		if (r.status === "completed" && !answer.trim()) {
+			lines.push("", "NO RESULT: the subagent finished without writing a final answer. Do not assume the work was done; re-run with a prompt that asks for an explicit written report.");
+		} else {
+			if (r.status === "failed") lines.push("", `FAILED: ${r.error ?? "unknown error"}`);
+			if (r.status === "killed") lines.push("", "KILLED before finishing.");
+			if (answer.trim()) lines.push("", r.status === "completed" ? answer : `Partial output (the run did not complete):\n${answer}`);
+			else lines.push("", "No output was produced.");
+			if (r.resultChars > answer.length) {
+				lines.push("", `[truncated: showing ${answer.length} of ${r.resultChars} characters${max < MAX_RESULT ? "; read the rest with bg_logs" : ""}]`);
+			}
+		}
+	}
+	return lines.join("\n");
+}
+
 function message(r: AgentRun) {
-	const body = r.error ? `${r.error}\n\n${r.result}`.trim() : r.result;
-	const shown = body.slice(0, 4096);
 	return {
 		customType: "bg-notification" as const,
-		content: notification(
-			"subagent-notification",
-			{
-				"task-id": r.id,
-				agent: r.agent,
-				name: r.name,
-				status: r.status,
-				duration: duration((r.completedAt ?? Date.now()) - r.startedAt),
-			},
-			"result",
-			shown || "(no output)",
-			body.length > shown.length,
-		) + "\nFull result: bg_logs with this task-id.",
+		content: `<subagent-notification>\n${escapeXml(report(r, 4096))}\n</subagent-notification>`,
 		display: true as const,
 		details: { kind: "agent" as const, id: r.id, name: r.name, status: r.status },
 	};
@@ -241,9 +302,15 @@ function message(r: AgentRun) {
 async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt: string): Promise<void> {
 	let failure: string | undefined;
 	let limited = false;
+	let lastText = "";
 	const unsub = session.subscribe((e) => {
 		if (e?.type === "message_end" && e.message?.role === "assistant") {
 			failure = e.message.stopReason === "error" ? e.message.errorMessage || "provider error" : undefined;
+			const c = e.message.content;
+			const t = (typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === "text" ? b.text ?? "" : "")).join("") : "").trim();
+			if (t) lastText = t; // the last message that said anything, not merely the last message
+		} else if (e?.type === "tool_execution_start") {
+			r.toolCalls++;
 		} else if (e?.type === "turn_end" && ++r.turns >= d.maxTurns && !limited) {
 			limited = true;
 			void session.abort().catch(() => {});
@@ -256,11 +323,16 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 	} catch (e) {
 		failure ||= e instanceof Error ? e.message : String(e);
 	}
-	try {
-		r.result = (session.getLastAssistantText() ?? "").slice(0, MAX_RESULT);
-	} catch {
-		// no assistant output
+	let full = lastText;
+	if (!full) {
+		try {
+			full = (session.getLastAssistantText() ?? "").trim();
+		} catch {
+			// no assistant output
+		}
 	}
+	r.resultChars = full.length;
+	r.result = full.slice(0, MAX_RESULT);
 	if (r.abort!.signal.aborted) r.status = "killed";
 	else if (limited) [r.status, r.error] = ["failed", `max_turns (${d.maxTurns}) reached`];
 	else if (failure) [r.status, r.error] = ["failed", failure];
@@ -284,6 +356,8 @@ export interface SpawnOptions {
 	prompt: string;
 	background: boolean;
 	description?: string;
+	/** Shown to the caller with the result. */
+	note?: string;
 	/** Parent tool-call signal: aborts a foreground child. */
 	signal?: AbortSignal;
 }
@@ -310,7 +384,10 @@ export async function spawn(ctx: ExtensionContext, d: Declaration, o: SpawnOptio
 		startedAt: Date.now(),
 		completedAt: null,
 		turns: 0,
+		toolCalls: 0,
 		result: "",
+		resultChars: 0,
+		note: o.note ?? null,
 		error: null,
 		notifyOnCompletion: o.background,
 		resultObservedAt: null,
@@ -374,5 +451,5 @@ export async function killAll(): Promise<void> {
 
 export function summary(r: AgentRun | AgentSnapshot): string {
 	const took = duration((r.completedAt ?? Date.now()) - r.startedAt);
-	return `${r.id}  [${r.status}]  ${r.agent}: ${r.name} (${r.model}, ${r.turns} turns, ${took})${r.error ? `\n    error: ${oneLine(r.error, 200)}` : ""}`;
+	return `${r.id}  [${stateLabel(r)}]  ${r.agent}: ${r.name} (${r.model}, ${r.turns} turns, ${r.toolCalls} tool calls, ${took})${r.error ? `\n    error: ${oneLine(r.error, 200)}` : ""}`;
 }

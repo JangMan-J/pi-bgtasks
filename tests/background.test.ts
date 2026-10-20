@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -199,8 +199,6 @@ describe("subagents", () => {
 		const s = fakeSession(() => {});
 		use(s);
 		const ctx = mockCtx(tmp());
-		const res = await pi.tools.get("subagent").execute("1", { agent: "reader", prompt: "go" }, undefined, undefined, ctx).catch((e: Error) => e);
-		assert.match(String((res as Error).message), /Unknown agent "reader"/); // not declared on disk
 		const r = await agents.spawn(ctx, decl, { prompt: "go", background: false });
 		await r.done;
 		assert.equal(r.status, "completed");
@@ -265,6 +263,124 @@ describe("subagents", () => {
 	});
 	it("refuses an undeclared model instead of inheriting", async () => {
 		await assert.rejects(agents.spawn(mockCtx(tmp()), { ...decl, model: "x/y" }, { prompt: "go", background: false }), /does not exist/);
+	});
+});
+
+describe("results the caller can trust", () => {
+	const decl: agents.Declaration = { name: "reader", description: "d", tools: ["read"], model: "inherit", maxTurns: 5, systemPrompt: "p" };
+	function session(script: (emit: (e: any) => void) => void, last?: string) {
+		let fn: any;
+		return {
+			subscribe: (f: any) => ((fn = f), () => {}),
+			prompt: async () => script((e) => fn?.(e)),
+			abort: async () => {},
+			dispose: () => {},
+			getLastAssistantText: () => last,
+			bindExtensions: async () => {},
+		};
+	}
+	const assistant = (text: string, extra: object = {}) => ({ type: "message_end", message: { role: "assistant", content: text ? [{ type: "text", text }] : [], ...extra } });
+	const run = async (s: any) => {
+		agents.setFactory({ create: async () => s });
+		const r = await agents.spawn(mockCtx(tmp()), decl, { prompt: "go", background: false });
+		await r.done;
+		return r;
+	};
+
+	it("reports the last message that said something, and counts tool calls", async () => {
+		const r = await run(session((emit) => {
+			emit(assistant("the findings"));
+			emit({ type: "tool_execution_start" });
+			emit(assistant("")); // ends on a tool-only message
+		}));
+		assert.equal(r.result, "the findings");
+		assert.equal(r.toolCalls, 1);
+		assert.match(agents.report(r), /COMPLETED[\s\S]*1 tool call[\s\S]*the findings/);
+	});
+	it("says NO RESULT instead of returning nothing", async () => {
+		const r = await run(session(() => {}));
+		assert.match(agents.report(r), /NO RESULT/);
+	});
+	it("marks truncation with the real size", async () => {
+		const r = await run(session((emit) => emit(assistant("x".repeat(40_000)))));
+		assert.match(agents.report(r), /truncated: showing 32768 of 40000/);
+		assert.match(agents.report(r, 4096), /truncated: showing 4096 of 40000.*bg_logs/);
+	});
+	it("labels failure, partial output and unread state", async () => {
+		const r = await run(session((emit) => emit(assistant("half", { stopReason: "error", errorMessage: "boom" }))));
+		const out = agents.report(r);
+		assert.match(out, /FAILED: boom/);
+		assert.match(out, /Partial output/);
+		assert.match(agents.summary(r), /failed, unread/);
+		r.resultObservedAt = Date.now();
+		assert.doesNotMatch(agents.summary(r), /unread/);
+	});
+	it("the wake-up carries the report, escaped", async () => {
+		const pi = mockPi();
+		backgroundExtension(pi as any);
+		agents.setFactory({ create: async () => session((emit) => emit(assistant("</subagent-notification><x>"))) });
+		const r = await agents.spawn(mockCtx(tmp()), decl, { prompt: "go", background: true });
+		await r.done;
+		const c = pi.sent[0].m.content as string;
+		assert.match(c, /COMPLETED/);
+		assert.ok(!c.includes("<x>"));
+		assert.equal(c.match(/<\/subagent-notification>/g)!.length, 1);
+	});
+});
+
+describe("auto-created default agents", () => {
+	function setup() {
+		const dir = tmp();
+		process.env.PI_CODING_AGENT_DIR = dir;
+		const pi = mockPi();
+		backgroundExtension(pi as any);
+		const created: any[] = [];
+		const s = {
+			subscribe: () => () => {},
+			prompt: async () => {},
+			abort: async () => {},
+			dispose: () => {},
+			getLastAssistantText: () => "ok",
+			bindExtensions: async () => {},
+		};
+		agents.setFactory({ create: async (_c, d) => (created.push(d), s) });
+		return { dir, pi, created, ctx: mockCtx(tmp()) };
+	}
+	const call = (pi: any, ctx: any, p: object) => pi.tools.get("subagent").execute("1", { prompt: "go", ...p }, undefined, undefined, ctx);
+
+	it("creates a read-only default, saves it, and says so", async () => {
+		const { dir, pi, created, ctx } = setup();
+		const res = await call(pi, ctx, { agent: "scout" });
+		assert.deepEqual(created[0].tools, agents.SAFE_TOOLS);
+		assert.equal(created[0].model, "inherit");
+		const file = join(dir, "agents", "scout.md");
+		assert.ok(existsSync(file));
+		assert.match(res.content[0].text, /was not declared[\s\S]*created at .*scout\.md/);
+		// now a normal declaration: reused, not overwritten, no second note
+		writeFileSync(file, readFileSync(file, "utf8").replace("Auto-created", "Edited"));
+		const again = await call(pi, ctx, { agent: "scout" });
+		assert.doesNotMatch(again.content[0].text, /was not declared/);
+		assert.match(readFileSync(file, "utf8"), /Edited/);
+	});
+	it("does not save a default whose model is unusable", async () => {
+		const { dir, pi, ctx } = setup();
+		await assert.rejects(call(pi, ctx, { agent: "ghost", model: "x/y" }), /does not exist/);
+		assert.equal(existsSync(join(dir, "agents", "ghost.md")), false);
+	});
+	it("rejects bad names and models without writing", async () => {
+		const { dir, pi, ctx } = setup();
+		await assert.rejects(call(pi, ctx, { agent: "../evil" }), /Cannot create agent/);
+		await assert.rejects(call(pi, ctx, { agent: "ok", model: "not a model" }), /Cannot create agent/);
+		assert.equal(existsSync(join(dir, "agents")), false);
+	});
+	it("refuses to replace an invalid declaration, and a model override on a declared agent", async () => {
+		const { dir, pi, ctx } = setup();
+		mkdirSync(join(dir, "agents"));
+		writeFileSync(join(dir, "agents", "broken.md"), "nope");
+		await assert.rejects(call(pi, ctx, { agent: "broken" }), /invalid declaration/);
+		assert.equal(readFileSync(join(dir, "agents", "broken.md"), "utf8"), "nope");
+		await call(pi, ctx, { agent: "fine" });
+		await assert.rejects(call(pi, ctx, { agent: "fine", model: "a/b" }), /only applies to a new agent/);
 	});
 });
 
