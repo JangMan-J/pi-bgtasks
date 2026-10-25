@@ -27,9 +27,9 @@ export const Type = {
 	},
 };
 
-/** Status plus whether the caller has read a finished result yet. */
-export function stateLabel(j: { status: Status; resultObservedAt?: number | null }): string {
-	return j.status !== "running" && !j.resultObservedAt ? `${j.status}, unread` : j.status;
+/** Status plus whether a finished result has reached the model yet (read with bg_logs, or delivered as a wake-up). */
+export function stateLabel(j: { status: Status; resultObservedAt?: number | null; notificationDeliveredAt?: number | null }): string {
+	return j.status !== "running" && !j.resultObservedAt && !j.notificationDeliveredAt ? `${j.status}, unread` : j.status;
 }
 
 export function newId(taken: (id: string) => boolean): string {
