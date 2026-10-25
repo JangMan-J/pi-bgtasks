@@ -445,22 +445,27 @@ describe("footer", () => {
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
-		assert.equal(ctx.status.bg, "[~] 1 bg");
+		assert.match(ctx.status.bg!, /\uf120 1⠋/);
 		await shell.kill(t);
 		await until(() => ctx.status.bg === undefined);
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
 	});
-	it("labels running and unread failures, and clears a failure once it is read", async () => {
-		assert.equal(label({ running: 2, failedUnread: 0 }, "bg"), "[~] 2 bg");
-		assert.equal(label({ running: 1, failedUnread: 2 }, "agent"), "[~] 1 agent [!] 2 agents failed");
-		assert.equal(label({ running: 0, failedUnread: 0 }, "bg"), undefined);
+	it("labels running with a spinner and unread failures in red, and clears a failure once it is read", async () => {
+		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
+		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45)), "T 2⠋");
+		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45, 3)), "T 2⠸");
+		assert.equal(strip(label({ running: 1, failedUnread: 2 }, "A", 141)), "A 1⠋  \uf071 2");
+		assert.match(label({ running: 0, failedUnread: 1 }, "T", 45)!, /38;5;203m/);
+		assert.equal(label({ running: 0, failedUnread: 0 }, "T", 45), undefined);
 		const pi = mockPi();
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "exit 3", notifyOnCompletion: false });
+		assert.ok(host.spinner, "spinner runs while a task runs");
 		await until(() => t.status === "failed");
-		assert.equal(ctx.status.bg, "[!] 1 bg failed");
+		assert.equal(host.spinner, undefined, "spinner stops when nothing runs");
+		assert.equal(strip(ctx.status.bg), "\uf071 1 bg".replace(" bg", ""));
 		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
 		assert.equal(ctx.status.bg, undefined);
@@ -473,8 +478,9 @@ describe("footer", () => {
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
-		assert.equal(ctx.status.bg, "[~] 1 bg");
-		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: "[~] 1 bg" });
+		assert.match(ctx.status.bg!, /\uf120 1⠋/);
+		assert.equal(seen.at(-1)?.key, "pi-background:bg");
+		assert.equal(seen.at(-1)?.text, ctx.status.bg);
 		await shell.kill(t);
 		await until(() => ctx.status.bg === undefined);
 		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: undefined });

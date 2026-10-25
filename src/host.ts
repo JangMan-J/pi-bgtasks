@@ -28,6 +28,9 @@ interface Host {
 	ctx?: ExtensionContext;
 	pending: Map<string, Entry>;
 	footer: WeakMap<object, Record<string, string | undefined>>;
+	/** Spinner: current frame and the interval driving it while anything runs. */
+	frame: number;
+	spinner?: ReturnType<typeof setInterval>;
 	counts: () => { bg: Counts; agents: Counts };
 	/** Every job store, so ids stay unique across shell tasks and subagents. */
 	stores: Set<Map<string, unknown>>;
@@ -37,6 +40,7 @@ const KEY = Symbol.for("jang.pi.bg.host.v1");
 export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	pending: new Map(),
 	footer: new WeakMap(),
+	frame: 0,
 	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
 	stores: new Set(),
 });
@@ -50,6 +54,29 @@ export function count(jobs: Iterable<Notifiable>): Counts {
 		else if (j.status === "failed" && !j.resultObservedAt && !j.notificationDeliveredAt) failedUnread++;
 	}
 	return { running, failedUnread };
+}
+
+host.frame ??= 0; // the object outlives /reload; older builds lack this field
+// A /reload loads this module again: take the spinner over so the old module's
+// interval stops driving the footer. The first publish() restarts it if needed.
+if (host.spinner) {
+	clearInterval(host.spinner);
+	host.spinner = undefined;
+}
+
+/** Start the spinner while anything runs; stop and reset it when nothing does. */
+function spin(busy: boolean): void {
+	if (busy && !host.spinner) {
+		host.spinner = setInterval(() => {
+			host.frame = (host.frame + 1) % FRAMES.length;
+			publish();
+		}, SPIN_MS);
+		host.spinner.unref?.();
+	} else if (!busy && host.spinner) {
+		clearInterval(host.spinner);
+		host.spinner = undefined;
+		host.frame = 0;
+	}
 }
 
 export const taken = (id: string) => [...host.stores].some((m) => m.has(id));
@@ -149,21 +176,30 @@ export function flush(): void {
  * `variable` is the zentui custom-value key a starship template can alias.
  */
 export const FOOTER = {
-	bg: { status: "bg", variable: "pi-background:bg", noun: "bg" },
-	agents: { status: "bg-agents", variable: "pi-background:agents", noun: "agent" },
+	bg: { status: "bg", variable: "pi-background:bg", icon: "\uf120", code: 45 },
+	agents: { status: "bg-agents", variable: "pi-background:agents", icon: "\udb81\udea9", code: 141 },
 } as const;
 
-/** `[~] 2 bg` while running; `[!] 1 bg failed` for a failure nobody has looked at; both when both. */
-export function label(c: Counts, noun: string): string | undefined {
+const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const color = (code: number, text: string) => `\x1b[38;5;${code}m${text}\x1b[0m`;
+const SPIN_MS = 120;
+
+/**
+ * Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, a
+ * braille spinner frame while anything runs. `[!]` failures nobody has looked at
+ * follow in red. Undefined when there is nothing to say.
+ */
+export function label(c: Counts, icon: string, code: number, frame = 0): string | undefined {
 	const parts: string[] = [];
-	if (c.running) parts.push(`[~] ${c.running} ${noun}${noun === "agent" && c.running !== 1 ? "s" : ""}`);
-	if (c.failedUnread) parts.push(`[!] ${c.failedUnread} ${noun}${noun === "agent" && c.failedUnread !== 1 ? "s" : ""} failed`);
-	return parts.length ? parts.join(" ") : undefined;
+	if (c.running) parts.push(color(code, `${icon} ${c.running}${FRAMES[frame % FRAMES.length]}`));
+	if (c.failedUnread) parts.push(color(203, `\uf071 ${c.failedUnread}`));
+	return parts.length ? parts.join("  ") : undefined;
 }
 
 /**
- * Footer: one plain, single-line value per key, set only on change, removed
- * when empty. No ANSI, no timers. Two channels, always both:
+ * Footer: one single-line value per key, set only on change, removed when
+ * empty. A spinner timer runs only while something is running. Two channels,
+ * always both:
  *  - `ctx.ui.setStatus(key)`: the contract every footer extension (Pi's own,
  *    zentui, powerline, statusline, starship styles) reads and places by key.
  *  - zentui custom-value protocol v1 under `variable`: ignored unless a starship
@@ -175,11 +211,12 @@ export function publish(): void {
 	try {
 		if (!ctx?.hasUI) return;
 		const counts = host.counts();
+		spin(counts.bg.running + counts.agents.running > 0);
 		const prev = host.footer.get(ctx) ?? {};
 		const next: Record<string, string | undefined> = {};
 		for (const k of ["bg", "agents"] as const) {
-			const { status, variable, noun } = FOOTER[k];
-			const text = label(counts[k], noun);
+			const { status, variable, icon, code } = FOOTER[k];
+			const text = label(counts[k], icon, code, host.frame);
 			next[k] = text;
 			if (prev[k] === text) continue;
 			ctx.ui.setStatus(status, text);

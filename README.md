@@ -72,15 +72,15 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 ## Footer
 
-Two plain-text, single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Set only on change, removed when empty. No ANSI, no timers.
+Two single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Set only on change, removed when empty. The spinner interval exists only while something is running.
 
 | Key | Text | Means |
 | --- | --- | --- |
-| `bg` | `[~] 2 bg` | two shell tasks running |
-| `bg` | `[!] 1 bg failed` | a task failed and nobody has read it or been woken with it yet |
-| `bg-agents` | `[~] 1 agent [!] 1 agent failed` | both at once |
+| `bg` | ` 2⠋` (blue) | two shell tasks running |
+| `bg` | ` 1` (red) | a task failed and nobody has read it or been woken with it yet |
+| `bg-agents` | `󰚩 1⠋   1` (purple, red) | one subagent running, one unread failure |
 
-A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. Themed footers style and place the two keys by name. Names and labels from tasks never reach the footer.
+A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. Themed footers place the two keys by name; zentui's per-key colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 
 ### zentui templates
 
