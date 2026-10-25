@@ -322,7 +322,7 @@ function message(r: AgentRun) {
 	return {
 		customType: "bg-notification" as const,
 		content: `<subagent-notification>\n${escapeXml(report(r, 4096))}\n</subagent-notification>`,
-		display: true as const,
+		display: false as const,
 		details: { kind: "agent" as const, id: r.id, name: r.name, status: r.status },
 	};
 }

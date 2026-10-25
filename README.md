@@ -65,6 +65,7 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 - Foreground subagents return the result, or throw with the partial result on failure. Pi's abort stops them.
 - Background jobs wake a follow-up turn once on completion. If the agent is busy, the result is injected at the next turn boundary. Reading it with `bg_logs` first suppresses the wake. `bg_kill` never wakes.
+- Wake-ups are `display: false`: the model gets the report, the transcript shows no card. The footer carries the user-visible state.
 - Limits: 16 running shell tasks, 4 running subagents, 32 finished records kept per kind.
 - Shell tasks run in their own process group (`bash -lc`): SIGTERM, then SIGKILL after 1.5 s. Logs are `0600` in a per-user `0700` directory (`PI_BG_LOG_DIR` overrides). Running groups are SIGKILLed if pi exits without its shutdown hook.
 - Jobs survive `/reload`; callbacks reach the current extension instance. They are stopped on any other shutdown.
@@ -80,9 +81,10 @@ Two lanes inside it, shell tasks then subagents:
 | --- | --- |
 | ` 0   0` (dim) | idle |
 | ` 2⠋   1⠋` (blue, purple) | two shell tasks and one subagent running |
+| ` 0   1   0` | a shell task finished and nobody has read it or been woken with it yet (green) |
 | ` 0   1   0` | a shell task failed and nobody has read it or been woken with it yet (red) |
 
-A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
+Those markers are the user's signal; nothing is added to the transcript. They leave the footer once the result is read with `bg_logs`, killed, or delivered to the model as a wake-up. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 
 ### zentui templates
 

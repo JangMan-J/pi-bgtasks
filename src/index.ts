@@ -58,20 +58,6 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		await Promise.all([shell.killAll(), agents.killAll()]);
 	});
 
-	// ---- notification rendering (one visible line; the payload stays for the model) ----
-	if (typeof pi.registerMessageRenderer === "function") {
-		void import("@earendil-works/pi-tui" as string)
-			.then(({ Text }: any) => {
-				pi.registerMessageRenderer("bg-notification", (m: any, _o: any, theme: any) => {
-					const d = m?.details ?? {};
-					const color = d.status === "failed" ? "error" : d.status === "killed" ? "warning" : "success";
-					const line = `[${d.kind === "agent" ? "agent" : "bg"} ${d.status ?? "done"}] ${d.name ?? ""} (${d.id ?? "?"})`;
-					return new Text(theme?.fg ? theme.fg(color, line) : line, 0, 0);
-				});
-			})
-			.catch(() => {});
-	}
-
 	// ---- tools -------------------------------------------------------------
 	pi.registerTool({
 		name: "bg_run",

@@ -10,7 +10,8 @@ import { escapeXml, type Notifiable } from "./kit.ts";
 export interface Message {
 	customType: "bg-notification";
 	content: string;
-	display: true;
+	/** Never shown in the transcript: the footer is the user's signal, the content is the model's. */
+	display: false;
 	details: { kind: "shell" | "agent"; id: string; name: string; status: string };
 }
 
@@ -18,9 +19,10 @@ interface Entry {
 	job: Notifiable;
 	build: () => Message;
 }
-/** Per kind: running now, and finished-failed that nobody has read or been woken with. */
+/** Per kind: running now, and finished results nobody has read or been woken with. */
 export interface Counts {
 	running: number;
+	doneUnread: number;
 	failedUnread: number;
 }
 interface Host {
@@ -44,19 +46,20 @@ export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	pending: new Map(),
 	footer: new WeakMap(),
 	frame: 0,
-	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
+	counts: () => ({ bg: { running: 0, doneUnread: 0, failedUnread: 0 }, agents: { running: 0, doneUnread: 0, failedUnread: 0 } }),
 	stores: new Set(),
 });
 
 /** Count one store's jobs for the footer. */
 export function count(jobs: Iterable<Notifiable>): Counts {
-	let running = 0;
-	let failedUnread = 0;
+	const c: Counts = { running: 0, doneUnread: 0, failedUnread: 0 };
 	for (const j of jobs) {
-		if (j.status === "running") running++;
-		else if (j.status === "failed" && !j.resultObservedAt && !j.notificationDeliveredAt) failedUnread++;
+		if (j.status === "running") c.running++;
+		else if (j.resultObservedAt || j.notificationDeliveredAt) continue;
+		else if (j.status === "failed") c.failedUnread++;
+		else if (j.status === "completed") c.doneUnread++;
 	}
-	return { running, failedUnread };
+	return c;
 }
 
 host.frame ??= 0; // the object outlives /reload; older builds lack this field
@@ -192,14 +195,16 @@ const SPIN_MS = 120;
 
 /**
  * Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, a
- * braille spinner frame while anything runs. Failures nobody has looked at
- * follow in red. Idle is a dim `icon 0`, present from session start, so the
- * footer keeps its shape instead of shifting when work begins.
+ * braille spinner frame while anything runs. Results nobody has looked at
+ * follow: completed in green, failed in red; they are the footer's stand-in for
+ * transcript cards, which this extension does not show. Idle is a dim
+ * `icon 0`, present from session start, so the footer keeps its shape.
  */
 export function label(c: Counts, icon: string, code: number, frame = 0): string {
 	const parts: string[] = [];
 	if (c.running) parts.push(color(code, `${icon} ${c.running}${FRAMES[frame % FRAMES.length]}`));
 	else parts.push(color(240, `${icon} 0`));
+	if (c.doneUnread) parts.push(color(82, `\uf00c ${c.doneUnread}`));
 	if (c.failedUnread) parts.push(color(203, `\uf071 ${c.failedUnread}`));
 	return parts.join("  ");
 }

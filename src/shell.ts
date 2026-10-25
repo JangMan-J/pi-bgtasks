@@ -125,7 +125,7 @@ function message(t: ShellTask) {
 			tail.text,
 			tail.truncated,
 		),
-		display: true as const,
+		display: false as const,
 		details: { kind: "shell" as const, id: t.id, name: oneLine(t.name), status: t.status },
 	};
 }
