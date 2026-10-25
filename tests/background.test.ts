@@ -459,12 +459,12 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "one key carries both lanes");
+		assert.equal(strip(ctx.status.bg), "\uf489 0  \uf21b 0", "one key carries both lanes");
 		assert.equal(ctx.status["bg-agents"], undefined, "no second key to place");
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
-		assert.match(ctx.status.bg!, /\uf120 1⠋/);
+		assert.match(ctx.status.bg!, /\uf489 1⠋/);
 		await shell.kill(t);
-		await until(() => strip(ctx.status.bg) === "\uf120 0  \uf21b 0");
+		await until(() => strip(ctx.status.bg) === "\uf489 0  \uf21b 0");
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
 		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
 		assert.equal(ctx.status.bg, undefined);
@@ -490,7 +490,7 @@ describe("footer", () => {
 		assert.match(ctx.status.bg!, /38;5;203m\uf071 0/);
 		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.match(ctx.status.bg!, /38;5;240m\uf120 0/);
+		assert.match(ctx.status.bg!, /38;5;240m\uf489 0/);
 	});
 	it("shows dim placeholders from session start, counts while running, and clears at shutdown", async () => {
 		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
@@ -500,12 +500,12 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "one key carries both lanes");
+		assert.equal(strip(ctx.status.bg), "\uf489 0  \uf21b 0", "one key carries both lanes");
 		assert.equal(ctx.status["bg-agents"], undefined, "no second key to place");
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
-		assert.match(ctx.status.bg!, /\uf120 1⠋/);
+		assert.match(ctx.status.bg!, /\uf489 1⠋/);
 		await shell.kill(t);
-		await until(() => strip(ctx.status.bg) === "\uf120 0  \uf21b 0");
+		await until(() => strip(ctx.status.bg) === "\uf489 0  \uf21b 0");
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
 		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
 		assert.equal(ctx.status.bg, undefined);
@@ -541,7 +541,7 @@ describe("footer", () => {
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
-		assert.match(ctx.status.bg!, /\uf120 1⠋/);
+		assert.match(ctx.status.bg!, /\uf489 1⠋/);
 		assert.equal(seen.at(-1)?.key, "pi-background:bg");
 		assert.equal(seen.at(-1)?.text, ctx.status.bg);
 		await shell.kill(t);
