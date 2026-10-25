@@ -183,7 +183,7 @@ export function flush(): void {
 export const FOOTER = { status: "bg", variable: "pi-background:bg" } as const;
 export const LANES = {
 	bg: { icon: "\uf489", code: 45 },
-	agents: { icon: "\uf21b", code: 141 },
+	agents: { icon: "\uf1ae", code: 141 },
 } as const;
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
