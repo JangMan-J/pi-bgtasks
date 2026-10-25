@@ -219,6 +219,18 @@ describe("subagents", () => {
 		assert.equal(pi.sent.length, 1);
 		assert.match(pi.sent[0].m.content, /<subagent-notification>/);
 	});
+	it("background with notifyOnCompletion: false never wakes; the report waits in bg_logs", async () => {
+		const pi = mockPi();
+		backgroundExtension(pi as any);
+		const ctx = mockCtx(tmp(), { idle: true });
+		await pi.fire("session_start", {}, ctx);
+		use(fakeSession(() => {}));
+		const r = await agents.spawn(ctx, decl, { prompt: "go", background: true, notifyOnCompletion: false });
+		await r.done;
+		assert.equal(pi.sent.length, 0);
+		assert.equal(await pi.fire("turn_end", {}, ctx), undefined);
+		assert.match(agents.report(r), /COMPLETED, UNREAD/);
+	});
 	it("enforces max_turns", async () => {
 		const s = fakeSession(async (emit) => {
 			emit({ type: "turn_end" });

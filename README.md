@@ -64,7 +64,7 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 ## Behaviour
 
 - Foreground subagents return the result, or throw with the partial result on failure. Pi's abort stops them.
-- Background jobs wake a follow-up turn once on completion. If the agent is busy, the result is injected at the next turn boundary. Reading it with `bg_logs` first suppresses the wake. `bg_kill` never wakes.
+- Background jobs wake a follow-up turn once on completion, unless started with `notifyOnCompletion: false` (both `bg_run` and `subagent`); then the result waits for `bg_logs`, and the footer does not flag it. If the agent is busy, the result is injected at the next turn boundary. Reading it with `bg_logs` first suppresses the wake. `bg_kill` never wakes.
 - Wake-ups are `display: false`: the model gets the report, the transcript shows no card. The footer carries the user-visible state.
 - Limits: 16 running shell tasks, 4 running subagents, 32 finished records kept per kind.
 - Shell tasks run in their own process group (`bash -lc`): SIGTERM, then SIGKILL after 1.5 s. Logs are `0600` in a per-user `0700` directory (`PI_BG_LOG_DIR` overrides). Running groups are SIGKILLed if pi exits without its shutdown hook.

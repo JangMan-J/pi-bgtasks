@@ -155,6 +155,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 				description: Type.Optional(Type.String({ description: "Short label for status display." })),
 				model: Type.Optional(Type.String({ description: "provider/id, or a bare model id (prefers a subscription provider). Required when creating a new agent; rejected for a declared one." })),
 				background: Type.Optional(Type.Boolean({ description: "Return an id now and wake a follow-up turn with the report (default false: wait and return the report)." })),
+				notifyOnCompletion: Type.Optional(Type.Boolean({ description: "Background only. Wake on completion (default true); false to leave the report for bg_logs and the footer." })),
 			}),
 			async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
 				bind(ctx);
@@ -179,9 +180,11 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 				} else if (p.model) {
 					throw new Error(`Agent "${d.name}" is declared with model ${d.model}; the model parameter only applies to a new agent.`);
 				}
-				const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, signal, note });
+				const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, notifyOnCompletion: p.notifyOnCompletion, signal, note });
 				if (r.background) {
-					return text(`Started subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).${note ? `\n${note}` : ""}\nCompletion will wake a follow-up turn with its report; bg_logs shows unread results.`, { id: r.id });
+					return text(`Started subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).${note ? `\n${note}` : ""}\n${
+						r.notifyOnCompletion ? "Completion will wake a follow-up turn with its report; bg_logs shows unread results." : "Completion notification disabled; read the report with bg_logs."
+					}`, { id: r.id });
 				}
 				await r.done;
 				r.resultObservedAt ??= Date.now();

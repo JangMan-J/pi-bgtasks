@@ -401,6 +401,8 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 export interface SpawnOptions {
 	prompt: string;
 	background: boolean;
+	/** Background only: wake a follow-up turn with the report (default true). */
+	notifyOnCompletion?: boolean;
 	description?: string;
 	/** Shown to the caller with the result. */
 	note?: string;
@@ -435,7 +437,7 @@ export async function spawn(ctx: ExtensionContext, d: Declaration, o: SpawnOptio
 		resultChars: 0,
 		note: o.note ?? null,
 		error: null,
-		notifyOnCompletion: o.background,
+		notifyOnCompletion: o.background && o.notifyOnCompletion !== false,
 		resultObservedAt: null,
 		notificationDeliveredAt: null,
 		abort: new AbortController(),
