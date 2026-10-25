@@ -75,16 +75,15 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 One status key, `bg`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
 
-Two lanes inside it, shell tasks then subagents:
+Two lanes inside it, shell tasks then subagents. The number is how many are running; glyph and colour change in place to show the lane's state:
 
 | Text | Means |
 | --- | --- |
 | ` 0   0` (dim) | idle |
 | ` 2⠋   1⠋` (blue, purple) | two shell tasks and one subagent running |
-| ` 0   1   0` | a shell task finished and nobody has read it or been woken with it yet (green) |
-| ` 0   1   0` | a shell task failed and nobody has read it or been woken with it yet (red) |
+| ` 0   1⠋` (red, purple) | a shell task failed and nobody has read it or been woken with it yet |
 
-Those markers are the user's signal; nothing is added to the transcript. They leave the footer once the result is read with `bg_logs`, killed, or delivered to the model as a wake-up. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
+The red clears once the failure is read with `bg_logs`, killed, or delivered to the model as a wake-up. Nothing is added to the transcript. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 
 ### zentui templates
 

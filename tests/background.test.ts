@@ -470,15 +470,15 @@ describe("footer", () => {
 		assert.equal(ctx.status.bg, undefined);
 		assert.equal(host.spinner, undefined);
 	});
-	it("labels running with a spinner and unread failures in red, and clears a failure once it is read", async () => {
+	it("counts running jobs only; colour carries the state; an unread failure turns the lane red until read", async () => {
 		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
-		assert.equal(strip(label({ running: 2, doneUnread: 0, failedUnread: 0 }, "T", 45)), "T 2⠋");
-		assert.equal(strip(label({ running: 2, doneUnread: 0, failedUnread: 0 }, "T", 45, 3)), "T 2⠸");
-		assert.equal(strip(label({ running: 1, doneUnread: 0, failedUnread: 2 }, "A", 141)), "A 1⠋  \uf071 2");
-		assert.match(label({ running: 0, doneUnread: 0, failedUnread: 1 }, "T", 45), /38;5;203m/);
-		assert.equal(strip(label({ running: 0, doneUnread: 0, failedUnread: 0 }, "T", 45)), "T 0");
-		assert.match(label({ running: 0, doneUnread: 0, failedUnread: 0 }, "T", 45), /38;5;240m/, "idle is dim");
-		assert.equal(strip(label({ running: 0, doneUnread: 2, failedUnread: 1 }, "T", 45)), "T 0  \uf00c 2  \uf071 1");
+		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45)), "T 2⠋");
+		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45, 3)), "T 2⠸");
+		assert.match(label({ running: 2, failedUnread: 0 }, "T", 45), /38;5;45m/, "running: lane colour");
+		assert.equal(strip(label({ running: 0, failedUnread: 0 }, "T", 45)), "T 0");
+		assert.match(label({ running: 0, failedUnread: 0 }, "T", 45), /38;5;240m/, "idle: dim");
+		assert.equal(strip(label({ running: 1, failedUnread: 2 }, "A", 141)), "\uf071 1⠋", "failures swap the glyph, not the count");
+		assert.match(label({ running: 1, failedUnread: 2 }, "A", 141), /38;5;203m/, "unread failure: red");
 		const pi = mockPi();
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
@@ -487,12 +487,12 @@ describe("footer", () => {
 		assert.ok(host.spinner, "spinner runs while a task runs");
 		await until(() => t.status === "failed");
 		assert.equal(host.spinner, undefined, "spinner stops when nothing runs");
-		assert.match(strip(ctx.status.bg)!, /^\uf120 0  \uf071 1  \uf21b 0/);
-		assert.deepEqual(count(shell.tasks.values()), { running: 0, doneUnread: 0, failedUnread: 1 });
+		assert.match(ctx.status.bg!, /38;5;203m\uf071 0/);
+		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.match(strip(ctx.status.bg)!, /^\uf120 0  \uf21b 0/);
+		assert.match(ctx.status.bg!, /38;5;240m\uf120 0/);
 	});
-	it("shows a completed result nobody has read, and clears it when it is read", async () => {
+	it("shows dim placeholders from session start, counts while running, and clears at shutdown", async () => {
 		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
 		shell.tasks.clear();
 		agents.runs.clear();
@@ -500,19 +500,16 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		const quiet = shell.start(ctx, { command: "true", notifyOnCompletion: false });
-		await until(() => quiet.status === "completed");
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "a task that opted out of waking needs no attention");
-		const t = shell.start(ctx, { command: "true" });
-		host.ctx = mockCtx(tmp(), { ui: true, idle: false }); // busy: delivery waits for a boundary, so it stays unread
-		await until(() => t.status === "completed");
-		host.ctx = ctx;
-		(host as any).footer.delete(ctx);
-		const { publish } = await import("../src/host.ts");
-		publish();
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf00c 1  \uf21b 0");
-		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0");
+		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "one key carries both lanes");
+		assert.equal(ctx.status["bg-agents"], undefined, "no second key to place");
+		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
+		assert.match(ctx.status.bg!, /\uf120 1⠋/);
+		await shell.kill(t);
+		await until(() => strip(ctx.status.bg) === "\uf120 0  \uf21b 0");
+		assert.ok(!/[\x00-\x1f]/.test(t.name));
+		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
+		assert.equal(ctx.status.bg, undefined);
+		assert.equal(host.spinner, undefined);
 	});
 	it("never puts a card in the transcript: every notification is display: false", async () => {
 		const pi = mockPi();

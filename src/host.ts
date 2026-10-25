@@ -19,10 +19,9 @@ interface Entry {
 	job: Notifiable;
 	build: () => Message;
 }
-/** Per kind: running now, and finished results nobody has read or been woken with. */
+/** Per kind: running now, and failures nobody has read or been woken with. */
 export interface Counts {
 	running: number;
-	doneUnread: number;
 	failedUnread: number;
 }
 interface Host {
@@ -46,18 +45,16 @@ export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	pending: new Map(),
 	footer: new WeakMap(),
 	frame: 0,
-	counts: () => ({ bg: { running: 0, doneUnread: 0, failedUnread: 0 }, agents: { running: 0, doneUnread: 0, failedUnread: 0 } }),
+	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
 	stores: new Set(),
 });
 
 /** Count one store's jobs for the footer. */
 export function count(jobs: Iterable<Notifiable>): Counts {
-	const c: Counts = { running: 0, doneUnread: 0, failedUnread: 0 };
+	const c: Counts = { running: 0, failedUnread: 0 };
 	for (const j of jobs) {
 		if (j.status === "running") c.running++;
-		else if (j.resultObservedAt || j.notificationDeliveredAt) continue;
-		else if (j.status === "failed") c.failedUnread++;
-		else if (j.status === "completed" && j.notifyOnCompletion) c.doneUnread++; // opted-out tasks need no attention
+		else if (j.status === "failed" && !j.resultObservedAt && !j.notificationDeliveredAt) c.failedUnread++;
 	}
 	return c;
 }
@@ -194,19 +191,16 @@ const color = (code: number, text: string) => `\x1b[38;5;${code}m${text}\x1b[0m`
 const SPIN_MS = 120;
 
 /**
- * Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, a
- * braille spinner frame while anything runs. Results nobody has looked at
- * follow: completed in green, failed in red; they are the footer's stand-in for
- * transcript cards, which this extension does not show. Idle is a dim
- * `icon 0`, present from session start, so the footer keeps its shape.
+ * Same recipe as pi-webtasks: nerd-font icon, 256-colour, the count of running
+ * jobs, a braille spinner frame while any run. State changes the glyph and
+ * colour in place, never the width: dim when idle, the lane colour while
+ * running, and a red warning glyph while a failure nobody has looked at is
+ * waiting. The footer is the user's whole signal; there are no transcript cards.
  */
 export function label(c: Counts, icon: string, code: number, frame = 0): string {
-	const parts: string[] = [];
-	if (c.running) parts.push(color(code, `${icon} ${c.running}${FRAMES[frame % FRAMES.length]}`));
-	else parts.push(color(240, `${icon} 0`));
-	if (c.doneUnread) parts.push(color(82, `\uf00c ${c.doneUnread}`));
-	if (c.failedUnread) parts.push(color(203, `\uf071 ${c.failedUnread}`));
-	return parts.join("  ");
+	const glyph = c.failedUnread ? "\uf071" : icon;
+	const text = `${glyph} ${c.running}${c.running ? FRAMES[frame % FRAMES.length] : ""}`;
+	return color(c.failedUnread ? 203 : c.running ? code : 240, text);
 }
 
 /** The one status line: shell lane, then agent lane. */
