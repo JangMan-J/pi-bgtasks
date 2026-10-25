@@ -137,8 +137,10 @@ export function defaultDeclaration(name: string, model: string): { decl: Declara
 		`model: ${model}`,
 		`max_turns: ${DEFAULT_MAX_TURNS}`,
 		"---",
-		"You are a read-only research subagent. Use only your tools to investigate the task; you cannot edit files or run commands.",
-		"Your final message is the only thing the caller receives: put your complete findings in it. If you could not find or finish something, say so plainly.",
+		"You are a read-only research subagent. Investigate with your tools; you cannot edit files or run commands.",
+		"Batch your work: read files in large chunks and group related searches, so turns go to findings, not round trips.",
+		"Base every claim on what you observed, and cite file:line. Name what you could not confirm instead of guessing.",
+		"Your final message is the only thing the caller receives, so put the complete findings in it. End it with `done` when the whole brief is covered, or `partial` followed by each open item and what blocked it.",
 		"",
 	].join("\n");
 	const decl = parseDeclaration(name, text);

@@ -2,12 +2,14 @@
 
 Background shell tasks and declared in-process subagents for Pi. Four tools, no commands, no settings.
 
-| Tool | Does |
-| --- | --- |
-| `bg_run` | Start a shell command in the background. Returns an id and a log path. |
-| `subagent` | Run a **declared** agent, foreground or `background: true`. |
-| `bg_logs` | List tasks and subagents, or read one by id (shell tail or subagent result). |
-| `bg_kill` | Stop one by id. |
+| Tool | Does | The model is told |
+| --- | --- | --- |
+| `bg_run` | Start a shell command in the background. Returns an id and a log path. | Start long commands before blocking work; completion wakes you, so never sleep or poll; report done only once every task has exited and been checked. |
+| `subagent` | Run a **declared** agent, foreground or `background: true`. | Hand off self-contained adjacent work (mapping, long reads, research, review, independent slices), several at once before blocking work; the prompt is the whole brief; a report is evidence, not completion. |
+| `bg_logs` | List tasks and subagents, or read one by id (shell tail or subagent report). | For reading more than a wake-up preview, or fresh state for a decision; not a way to wait. |
+| `bg_kill` | Stop one by id. | For work no longer needed or run away; never wakes a turn. |
+
+The tool descriptions carry those instructions, so they travel with the tools into any session. Three short `promptGuidelines` add what a general `AGENTS.md` usually does not: start side work before blocking work, write a complete brief, never poll.
 
 Do not load it with `pi-bg-tasks` or `@gotgenes/pi-subagents`; the tool names clash.
 
@@ -37,7 +39,7 @@ You read code and report what you find. Do not edit files.
 
 ### Undeclared names
 
-Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, a prompt that demands a written final answer. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
+Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, and a prompt that asks for batched work, observed and cited claims, and a final message ending in `done` or `partial` with the open items. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
 
 Parsing is strict. An unknown key, a missing field, or a bad value makes that file invalid; it is not spawnable and the error is shown when the model asks for it. An invalid project file does not fall back to the global one it shadows.
 
@@ -70,14 +72,28 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 ## Footer
 
-Two plain-text, single-line statuses through `ctx.ui.setStatus`, set only when the count is non-zero and removed at zero. No ANSI, no timers.
+Two plain-text, single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Set only on change, removed when empty. No ANSI, no timers.
 
-| Key | Text |
-| --- | --- |
-| `bg` | `[~] 2 bg` |
-| `bg-agents` | `[~] 1 agent` |
+| Key | Text | Means |
+| --- | --- | --- |
+| `bg` | `[~] 2 bg` | two shell tasks running |
+| `bg` | `[!] 1 bg failed` | a task failed and nobody has read it or been woken with it yet |
+| `bg-agents` | `[~] 1 agent [!] 1 agent failed` | both at once |
 
-Themed footers (zentui, starship) style and place them per key. Names and labels from tasks never reach the footer.
+A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. Themed footers style and place the two keys by name. Names and labels from tasks never reach the footer.
+
+### zentui templates
+
+The same values are also offered through zentui's custom-value publisher protocol v1 under the keys `pi-background:bg` and `pi-background:agents`. Alias one in a starship template and it moves there; the `setStatus` copy for that key is cleared so it is never shown twice. Remove the alias and it returns to `setStatus`. Nothing changes for footers that do not alias.
+
+```json
+{
+  "components": { "footer": { "styles": { "starship": {
+    "variables": { "bg": "pi-background:bg", "agents": "pi-background:agents" },
+    "compactFormat": "$cwd$wrap(on $git_branch)$wrap($bg)($sep$agents)$wrap_sep$tokens"
+  } } } }
+}
+```
 
 ## Integration protocol
 

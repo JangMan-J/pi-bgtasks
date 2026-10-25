@@ -4,7 +4,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as agents from "./agents.ts";
-import { boundary, flush, host, observed, publish } from "./host.ts";
+import { boundary, count, flush, host, observed, publish } from "./host.ts";
 import { oneLine, readTail, resolveId, Type } from "./kit.ts";
 import * as shell from "./shell.ts";
 
@@ -23,9 +23,10 @@ function subagentDescription(cwd: string): string {
 	const { agents: declared, errors } = agents.loadDeclarations(cwd);
 	const list = [...declared.values()].map((d) => `- ${d.name}: ${d.description}`).join("\n") || "(none declared)";
 	return [
-		"Run a declared subagent in-process. Each agent is declared in .pi/agents/*.md or ~/.pi/agent/agents/*.md with its own prompt, tools and model.",
-		"An undeclared name creates a read-only default agent (tools: read, grep, find, ls) and saves it as a declaration; `model` is then required (provider/id, or a bare model id, which prefers a subscription provider): models are never inherited.",
-		"Foreground (default) returns a report: status, model, turns, tool calls, then the answer, or an explicit NO RESULT / FAILED / KILLED notice. background: true returns a task id and wakes a follow-up turn with the same report; bg_logs lists unread results.",
+		"Hand one bounded, self-contained piece of work to a fresh agent with its own context window, tools and model. Only its final report comes back, so your context stays small. Use it for adjacent work that needs none of your conversation: mapping or searching a codebase, reading many files or long logs, research, a review or second opinion, and each independent slice of a multi-part request. Start these with background: true, several in one turn, before you begin blocking work of your own. Keep work that is trivial (one or two calls) or that depends on context only you hold.",
+		"The prompt is the whole brief: goal, paths, constraints, what counts as done, and the exact shape of the answer you want. The subagent sees nothing else: no conversation, no AGENTS.md, no attachments.",
+		"Every run returns one report: a header (id, agent, state, model, turns, tool calls, duration), then the answer or an explicit NO RESULT / FAILED / KILLED notice. A report is evidence, not completion: check what matters before you report done. Foreground returns it directly; background returns an id and wakes a follow-up turn with it, and bg_logs lists reports not yet read.",
+		"Agents are declared in .pi/agents/<name>.md (project) or ~/.pi/agent/agents/<name>.md, each with its own prompt, tools and model. An undeclared name creates a read-only default (read, grep, find, ls) and saves it there; model is then required (provider/id, or a bare model id, which prefers a subscription provider). Models are never inherited.",
 		`Declared agents:\n${list}`,
 		...(errors.length ? [`${errors.length} invalid declaration(s) ignored.`] : []),
 	].join("\n");
@@ -33,7 +34,7 @@ function subagentDescription(cwd: string): string {
 
 export default function backgroundExtension(pi: ExtensionAPI) {
 	host.pi = pi;
-	host.counts = () => ({ bg: shell.running().length, agents: agents.running().length });
+	host.counts = () => ({ bg: count(shell.tasks.values()), agents: count(agents.runs.values()) });
 	const bind = (ctx: ExtensionContext) => void (host.ctx = ctx);
 
 	// ---- hooks -------------------------------------------------------------
@@ -75,8 +76,8 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		name: "bg_run",
 		label: "Background Run",
 		description:
-			"Start a long-running shell command in the background; returns its taskId and logPath at once. Completion wakes a follow-up turn unless the result was already read with bg_logs. Do not sleep or poll.",
-		promptSnippet: "Run a long-running shell command in the background; wakes a follow-up turn on completion.",
+			"Start a shell command in the background and keep working. Use it for anything that would block you longer than a few seconds and whose output you do not need for your very next step: builds, test suites, installs, downloads, servers. Start these before work that must block. Returns taskId and logPath at once. When the command exits, a follow-up turn wakes you with the exit code and an output tail, so never sleep, poll, or spin on bg_logs. A standing daemon takes notifyOnCompletion: false. Before you report done, every task you started must have exited and been checked.",
+		promptSnippet: "Start a long shell command in the background; a follow-up turn wakes on exit.",
 		parameters: Type.Object({
 			command: Type.String({ description: "Shell command, run with `bash -lc`." }),
 			name: Type.Optional(Type.String({ description: "Short label for status display." })),
@@ -100,8 +101,8 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		name: "bg_logs",
 		label: "Background Status & Logs",
 		description:
-			"List background tasks and subagents, or read one: a shell task's output tail or a subagent's result. Reading a finished task suppresses its wake-up.",
-		promptSnippet: "List background tasks/subagents or read one by taskId.",
+			"List background tasks and subagents, or read one by id: a shell task's output tail, or a subagent's full report. Use it when a wake-up told you something finished and you need more than the preview, or when fresh state is needed for a control decision. It is not a way to wait: reading a finished task marks it read and cancels its wake-up; reading a running one only shows progress so far.",
+		promptSnippet: "List background tasks and subagents, or read one's output or report by id.",
 		parameters: Type.Object({
 			taskId: Type.Optional(Type.String({ description: "Task id or unique prefix. Omit to list all." })),
 			tailLines: Type.Optional(Type.Number({ description: "Shell output lines to return (default 80)." })),
@@ -130,8 +131,9 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bg_kill",
 		label: "Background Kill",
-		description: "Stop a running background task (its process group) or subagent by taskId.",
-		promptSnippet: "Stop a running background task or subagent by taskId.",
+		description:
+			"Stop a running background task (its whole process group) or subagent by id. Use it when the work is no longer needed, has run away, or must be abandoned before you report. Killing never wakes a turn; partial output stays readable with bg_logs.",
+		promptSnippet: "Stop a running background task or subagent by id.",
 		parameters: Type.Object({ taskId: Type.String({ description: "Task id or unique prefix." }) }),
 		async execute(_id: string, p: any, _s: unknown, _u: unknown, ctx: ExtensionContext) {
 			bind(ctx);
@@ -151,13 +153,18 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 			name: "subagent",
 			label: "Subagent",
 			description,
-			promptSnippet: "Run a declared in-process subagent, in the foreground or background.",
+			promptSnippet: "Hand self-contained adjacent work (mapping, search, long reads, research, review, independent slices) to a fresh-context subagent; background: true to run several at once.",
+			promptGuidelines: [
+				"Before blocking work, start what can run beside it: bg_run for long commands, subagent with background: true for adjacent self-contained work, one call per independent part, all in the same turn.",
+				"A subagent prompt is a complete brief: goal, paths, constraints, what counts as done, and the answer shape. It sees nothing of your conversation.",
+				"Never wait by polling; completion wakes you. Report done only after every task and subagent you started has finished and its result is checked.",
+			],
 			parameters: Type.Object({
-				agent: Type.String({ description: "Name of a declared agent, or a new name to create a read-only default." }),
-				prompt: Type.String({ description: "Complete, self-contained task. The subagent sees nothing else." }),
+				agent: Type.String({ description: "A declared agent name, or a new name to create a read-only default." }),
+				prompt: Type.String({ description: "The complete brief: goal, paths, constraints, done-criteria, answer shape. The subagent sees nothing else." }),
 				description: Type.Optional(Type.String({ description: "Short label for status display." })),
-				model: Type.Optional(Type.String({ description: "provider/id, or a model id (prefers a subscription provider). Required when creating a new agent; not allowed for a declared one." })),
-				background: Type.Optional(Type.Boolean({ description: "Return a task id now and wake on completion (default false)." })),
+				model: Type.Optional(Type.String({ description: "provider/id, or a bare model id (prefers a subscription provider). Required when creating a new agent; rejected for a declared one." })),
+				background: Type.Optional(Type.Boolean({ description: "Return an id now and wake a follow-up turn with the report (default false: wait and return the report)." })),
 			}),
 			async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
 				bind(ctx);

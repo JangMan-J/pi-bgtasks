@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import backgroundExtension from "../src/index.ts";
 import * as agents from "../src/agents.ts";
 import * as shell from "../src/shell.ts";
-import { host } from "../src/host.ts";
+import { count, host, label } from "../src/host.ts";
 import { oneLine, readTail } from "../src/kit.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "pibg-"));
@@ -449,6 +449,47 @@ describe("footer", () => {
 		await shell.kill(t);
 		await until(() => ctx.status.bg === undefined);
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
+	});
+	it("labels running and unread failures, and clears a failure once it is read", async () => {
+		assert.equal(label({ running: 2, failedUnread: 0 }, "bg"), "[~] 2 bg");
+		assert.equal(label({ running: 1, failedUnread: 2 }, "agent"), "[~] 1 agent [!] 2 agents failed");
+		assert.equal(label({ running: 0, failedUnread: 0 }, "bg"), undefined);
+		const pi = mockPi();
+		backgroundExtension(pi as any);
+		const ctx = mockCtx(tmp(), { ui: true });
+		await pi.fire("session_start", {}, ctx);
+		const t = shell.start(ctx, { command: "exit 3", notifyOnCompletion: false });
+		await until(() => t.status === "failed");
+		assert.equal(ctx.status.bg, "[!] 1 bg failed");
+		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
+		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
+		assert.equal(ctx.status.bg, undefined);
+	});
+	it("routes a key to a zentui template when one aliases it, and never shows it twice", async () => {
+		const pi = mockPi();
+		const seen: any[] = [];
+		let active = false;
+		(pi as any).events = {
+			emit(name: string, payload: any) {
+				if (name === "zentui:variable-capability" && payload?.key === "pi-background:bg") Object.assign(payload, { supported: true, version: 1, active });
+				if (name === "zentui:variable") seen.push(payload);
+			},
+		};
+		backgroundExtension(pi as any);
+		const ctx = mockCtx(tmp(), { ui: true });
+		await pi.fire("session_start", {}, ctx);
+		const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
+		assert.equal(ctx.status.bg, "[~] 1 bg");
+		assert.equal(seen.length, 0);
+		active = true;
+		const u = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
+		assert.equal(ctx.status.bg, undefined, "setStatus copy cleared once a template takes the key");
+		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: "[~] 2 bg" });
+		active = false;
+		await shell.kill(u);
+		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: undefined }, "variable removed when the template stops asking");
+		assert.equal(ctx.status.bg, "[~] 1 bg");
+		await shell.kill(t);
 	});
 	it("oneLine strips control characters", () => assert.equal(oneLine("a\x1b]0;x\x07\nb"), "a ]0;x b"));
 });

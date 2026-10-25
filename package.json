@@ -3,17 +3,45 @@
   "version": "0.1.0",
   "description": "Background shell tasks and declared in-process subagents for Pi: bg_run, bg_logs, bg_kill, subagent.",
   "type": "module",
-  "keywords": ["pi-package", "pi", "pi-extension", "background-tasks", "subagents"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "background-tasks",
+    "subagents"
+  ],
   "author": "JangMan-J",
   "license": "MIT",
-  "engines": { "node": ">=22.0.0" },
-  "files": ["src", "README.md", "LICENSE"],
-  "exports": { ".": "./src/index.ts" },
-  "pi": { "extensions": ["./src/index.ts"] },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "tsc --noEmit && npm test"
   },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=1.0.0" },
-  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } }
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
 }
