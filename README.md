@@ -78,7 +78,7 @@ Two single-line statuses through `ctx.ui.setStatus`, the channel every footer ex
 | --- | --- | --- |
 | `bg` | ` 2⠋` (blue) | two shell tasks running |
 | `bg` | ` 1` (red) | a task failed and nobody has read it or been woken with it yet |
-| `bg-agents` | `󰚩 1⠋   1` (purple, red) | one subagent running, one unread failure |
+| `bg-agents` | `F21b 1⠋   1` (purple, red) | one subagent running, one unread failure |
 
 A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. Themed footers place the two keys by name; zentui's per-key colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 

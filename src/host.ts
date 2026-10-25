@@ -177,7 +177,7 @@ export function flush(): void {
  */
 export const FOOTER = {
 	bg: { status: "bg", variable: "pi-background:bg", icon: "\uf120", code: 45 },
-	agents: { status: "bg-agents", variable: "pi-background:agents", icon: "\udb81\udea9", code: 141 },
+	agents: { status: "bg-agents", variable: "pi-background:agents", icon: "\uf21b", code: 141 },
 } as const;
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
