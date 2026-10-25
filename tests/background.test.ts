@@ -465,6 +465,24 @@ describe("footer", () => {
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
 		assert.equal(ctx.status.bg, undefined);
 	});
+	it("still publishes after a /reload that left an older host object behind", async () => {
+		const saved = host.routed;
+		(host as any).routed = undefined; // what a host built before this field looks like
+		try {
+			const mod = await import(`../src/host.ts?reload=${Date.now()}`);
+			assert.ok(host.routed instanceof Set, "module load migrates the surviving host");
+			const pi = mockPi();
+			backgroundExtension(pi as any);
+			const ctx = mockCtx(tmp(), { ui: true });
+			await pi.fire("session_start", {}, ctx);
+			const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
+			assert.equal(ctx.status.bg, "[~] 1 bg");
+			await shell.kill(t);
+			void mod;
+		} finally {
+			host.routed = saved ?? new Set();
+		}
+	});
 	it("routes a key to a zentui template when one aliases it, and never shows it twice", async () => {
 		const pi = mockPi();
 		const seen: any[] = [];

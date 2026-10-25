@@ -43,6 +43,8 @@ export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
 	stores: new Set(),
 });
+// The object outlives /reload; a host made by an older build may lack newer fields.
+host.routed ??= new Set();
 
 /** Count one store's jobs for the footer. */
 export function count(jobs: Iterable<Notifiable>): Counts {
