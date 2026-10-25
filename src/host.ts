@@ -31,6 +31,8 @@ interface Host {
 	/** Spinner: current frame and the interval driving it while anything runs. */
 	frame: number;
 	spinner?: ReturnType<typeof setInterval>;
+	/** Set while the session shuts down, so late callbacks do not repaint a cleared footer. */
+	closed?: boolean;
 	counts: () => { bg: Counts; agents: Counts };
 	/** Every job store, so ids stay unique across shell tasks and subagents. */
 	stores: Set<Map<string, unknown>>;
@@ -186,20 +188,22 @@ const SPIN_MS = 120;
 
 /**
  * Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, a
- * braille spinner frame while anything runs. `[!]` failures nobody has looked at
- * follow in red. Undefined when there is nothing to say.
+ * braille spinner frame while anything runs. Failures nobody has looked at
+ * follow in red. Idle is a dim `icon 0`, present from session start, so the
+ * footer keeps its shape instead of shifting when work begins.
  */
-export function label(c: Counts, icon: string, code: number, frame = 0): string | undefined {
+export function label(c: Counts, icon: string, code: number, frame = 0): string {
 	const parts: string[] = [];
 	if (c.running) parts.push(color(code, `${icon} ${c.running}${FRAMES[frame % FRAMES.length]}`));
+	else parts.push(color(240, `${icon} 0`));
 	if (c.failedUnread) parts.push(color(203, `\uf071 ${c.failedUnread}`));
-	return parts.length ? parts.join("  ") : undefined;
+	return parts.join("  ");
 }
 
 /**
- * Footer: one single-line value per key, set only on change, removed when
- * empty. A spinner timer runs only while something is running. Two channels,
- * always both:
+ * Footer: one single-line value per key, always present while the session is
+ * open, set only on change. A spinner timer runs only while something is
+ * running. Two channels, always both:
  *  - `ctx.ui.setStatus(key)`: the contract every footer extension (Pi's own,
  *    zentui, powerline, statusline, starship styles) reads and places by key.
  *  - zentui custom-value protocol v1 under `variable`: ignored unless a starship
@@ -209,7 +213,7 @@ export function label(c: Counts, icon: string, code: number, frame = 0): string 
 export function publish(): void {
 	const ctx = host.ctx;
 	try {
-		if (!ctx?.hasUI) return;
+		if (!ctx?.hasUI || host.closed) return;
 		const counts = host.counts();
 		spin(counts.bg.running + counts.agents.running > 0);
 		const prev = host.footer.get(ctx) ?? {};
@@ -225,5 +229,22 @@ export function publish(): void {
 		host.footer.set(ctx, next);
 	} catch {
 		// Stale or closing UI: nothing to update.
+	}
+}
+
+/** Session end: remove both keys and stop the spinner. */
+export function clear(): void {
+	host.closed = true;
+	spin(false);
+	const ctx = host.ctx;
+	try {
+		if (!ctx?.hasUI) return;
+		for (const k of ["bg", "agents"] as const) {
+			ctx.ui.setStatus(FOOTER[k].status, undefined);
+			emit("zentui:variable", { key: FOOTER[k].variable, text: undefined });
+		}
+		host.footer.delete(ctx);
+	} catch {
+		// UI already gone.
 	}
 }

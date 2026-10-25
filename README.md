@@ -72,10 +72,11 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 ## Footer
 
-Two single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Set only on change, removed when empty. The spinner interval exists only while something is running.
+Two single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Both keys are present from session start as a dim `icon 0`, so the footer keeps its shape when work begins; they are removed at session end. Set only on change. The spinner interval exists only while something is running.
 
 | Key | Text | Means |
 | --- | --- | --- |
+| `bg` | ` 0` (dim) | idle |
 | `bg` | ` 2⠋` (blue) | two shell tasks running |
 | `bg` | ` 1` (red) | a task failed and nobody has read it or been woken with it yet |
 | `bg-agents` | ` 1⠋   1` (purple, red) | one subagent running, one unread failure |

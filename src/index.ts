@@ -4,7 +4,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as agents from "./agents.ts";
-import { boundary, count, flush, host, observed, publish } from "./host.ts";
+import { boundary, clear, count, flush, host, observed, publish } from "./host.ts";
 import { oneLine, readTail, resolveId, Type } from "./kit.ts";
 import * as shell from "./shell.ts";
 
@@ -41,6 +41,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	let described = "";
 	pi.on("session_start", async (_e, ctx) => {
 		bind(ctx);
+		host.closed = false;
 		publish();
 		registerSubagent(ctx.cwd);
 	});
@@ -53,8 +54,8 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (e) => {
 		if (e.reason === "reload") return; // jobs survive a reload
 		host.pending.clear();
+		clear();
 		await Promise.all([shell.killAll(), agents.killAll()]);
-		publish();
 	});
 
 	// ---- notification rendering (one visible line; the payload stays for the model) ----

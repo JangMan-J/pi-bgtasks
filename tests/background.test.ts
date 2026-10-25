@@ -439,24 +439,34 @@ describe("provider choice", () => {
 });
 
 describe("footer", () => {
-	it("publishes plain single-line statuses and clears them", async () => {
+	it("shows dim placeholders from session start, counts while running, and clears at shutdown", async () => {
+		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
+		shell.tasks.clear();
+		agents.runs.clear();
 		const pi = mockPi();
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
+		assert.equal(strip(ctx.status.bg), "\uf120 0");
+		assert.equal(strip(ctx.status["bg-agents"]), "\uf21b 0");
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
 		assert.match(ctx.status.bg!, /\uf120 1⠋/);
 		await shell.kill(t);
-		await until(() => ctx.status.bg === undefined);
+		await until(() => strip(ctx.status.bg) === "\uf120 0");
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
+		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
+		assert.equal(ctx.status.bg, undefined);
+		assert.equal(ctx.status["bg-agents"], undefined);
+		assert.equal(host.spinner, undefined);
 	});
 	it("labels running with a spinner and unread failures in red, and clears a failure once it is read", async () => {
 		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
 		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45)), "T 2⠋");
 		assert.equal(strip(label({ running: 2, failedUnread: 0 }, "T", 45, 3)), "T 2⠸");
 		assert.equal(strip(label({ running: 1, failedUnread: 2 }, "A", 141)), "A 1⠋  \uf071 2");
-		assert.match(label({ running: 0, failedUnread: 1 }, "T", 45)!, /38;5;203m/);
-		assert.equal(label({ running: 0, failedUnread: 0 }, "T", 45), undefined);
+		assert.match(label({ running: 0, failedUnread: 1 }, "T", 45), /38;5;203m/);
+		assert.equal(strip(label({ running: 0, failedUnread: 0 }, "T", 45)), "T 0");
+		assert.match(label({ running: 0, failedUnread: 0 }, "T", 45), /38;5;240m/, "idle is dim");
 		const pi = mockPi();
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
@@ -465,10 +475,10 @@ describe("footer", () => {
 		assert.ok(host.spinner, "spinner runs while a task runs");
 		await until(() => t.status === "failed");
 		assert.equal(host.spinner, undefined, "spinner stops when nothing runs");
-		assert.equal(strip(ctx.status.bg), "\uf071 1 bg".replace(" bg", ""));
+		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf071 1");
 		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.equal(ctx.status.bg, undefined);
+		assert.equal(strip(ctx.status.bg), "\uf120 0");
 	});
 	it("offers the same value as a zentui variable without touching setStatus", async () => {
 		const pi = mockPi();
@@ -482,8 +492,8 @@ describe("footer", () => {
 		assert.equal(seen.at(-1)?.key, "pi-background:bg");
 		assert.equal(seen.at(-1)?.text, ctx.status.bg);
 		await shell.kill(t);
-		await until(() => ctx.status.bg === undefined);
-		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: undefined });
+		await until(() => /38;5;240m/.test(ctx.status.bg ?? ""));
+		assert.equal(seen.at(-1)?.text, ctx.status.bg);
 	});
 	it("oneLine strips control characters", () => assert.equal(oneLine("a\x1b]0;x\x07\nb"), "a ]0;x b"));
 });
