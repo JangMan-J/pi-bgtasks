@@ -215,9 +215,28 @@ export interface Factory {
 	create(ctx: ExtensionContext, d: Declaration, model: unknown): Promise<ChildSession>;
 }
 
+/**
+ * Set while a child session is being built. The child loads extensions itself,
+ * including this one; the entry function sees this and installs nothing, so the
+ * shared host stays bound to the parent. A counter: children can start concurrently.
+ */
+export const CHILD_KEY = Symbol.for("jang.pi.bg.child.v1");
+export const buildingChild = () => ((globalThis as any)[CHILD_KEY] ?? 0) > 0;
+
 /** Real session factory. The SDK is imported lazily so loading this extension never fails on it. */
 export const sdkFactory: Factory = {
 	async create(ctx, d, model) {
+		const g = globalThis as any;
+		g[CHILD_KEY] = (g[CHILD_KEY] ?? 0) + 1;
+		try {
+			return await build(ctx, d, model);
+		} finally {
+			g[CHILD_KEY]--;
+		}
+	},
+};
+
+async function build(ctx: ExtensionContext, d: Declaration, model: unknown): Promise<ChildSession> {
 		const sdk: any = await import("@earendil-works/pi-coding-agent");
 		const agentDir = sdk.getAgentDir();
 		const settingsManager = sdk.SettingsManager.create(ctx.cwd, agentDir);
@@ -246,8 +265,7 @@ export const sdkFactory: Factory = {
 		});
 		await session.bindExtensions({});
 		return session;
-	},
-};
+}
 let factory: Factory = sdkFactory;
 export const setFactory = (f: Factory | undefined) => void (factory = f ?? sdkFactory);
 

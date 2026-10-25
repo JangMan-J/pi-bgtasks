@@ -57,7 +57,7 @@ export function count(jobs: Iterable<Notifiable>): Counts {
 		if (j.status === "running") c.running++;
 		else if (j.resultObservedAt || j.notificationDeliveredAt) continue;
 		else if (j.status === "failed") c.failedUnread++;
-		else if (j.status === "completed") c.doneUnread++;
+		else if (j.status === "completed" && j.notifyOnCompletion) c.doneUnread++; // opted-out tasks need no attention
 	}
 	return c;
 }

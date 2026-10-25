@@ -33,6 +33,9 @@ function subagentDescription(cwd: string): string {
 }
 
 export default function backgroundExtension(pi: ExtensionAPI) {
+	// A subagent's session loads this extension too. It must not take over the
+	// shared host (wake-ups and the footer belong to the parent), and it gets no tools.
+	if (agents.buildingChild()) return;
 	host.pi = pi;
 	host.counts = () => ({ bg: count(shell.tasks.values()), agents: count(agents.runs.values()) });
 	const bind = (ctx: ExtensionContext) => void (host.ctx = ctx);

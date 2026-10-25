@@ -488,8 +488,16 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		const t = shell.start(ctx, { command: "true", notifyOnCompletion: false });
+		const quiet = shell.start(ctx, { command: "true", notifyOnCompletion: false });
+		await until(() => quiet.status === "completed");
+		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "a task that opted out of waking needs no attention");
+		const t = shell.start(ctx, { command: "true" });
+		host.ctx = mockCtx(tmp(), { ui: true, idle: false }); // busy: delivery waits for a boundary, so it stays unread
 		await until(() => t.status === "completed");
+		host.ctx = ctx;
+		(host as any).footer.delete(ctx);
+		const { publish } = await import("../src/host.ts");
+		publish();
 		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf00c 1  \uf21b 0");
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
 		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0");
@@ -503,6 +511,18 @@ describe("footer", () => {
 		await until(() => pi.sent.length === 1);
 		assert.equal(pi.sent[0].m.display, false);
 		assert.equal(t.notificationDeliveredAt !== null, true);
+	});
+	it("does not install inside a child session", async () => {
+		const g = globalThis as any;
+		g[agents.CHILD_KEY] = 1;
+		try {
+			const pi = mockPi();
+			backgroundExtension(pi as any);
+			assert.equal(pi.tools.size, 0);
+			assert.notEqual(host.pi, pi);
+		} finally {
+			g[agents.CHILD_KEY] = 0;
+		}
 	});
 	it("offers the same value as a zentui variable without touching setStatus", async () => {
 		const pi = mockPi();
