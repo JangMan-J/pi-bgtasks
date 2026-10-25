@@ -28,8 +28,6 @@ interface Host {
 	ctx?: ExtensionContext;
 	pending: Map<string, Entry>;
 	footer: WeakMap<object, Record<string, string | undefined>>;
-	/** Keys currently routed to a zentui template variable instead of `setStatus`. */
-	routed: Set<string>;
 	counts: () => { bg: Counts; agents: Counts };
 	/** Every job store, so ids stay unique across shell tasks and subagents. */
 	stores: Set<Map<string, unknown>>;
@@ -39,12 +37,9 @@ const KEY = Symbol.for("jang.pi.bg.host.v1");
 export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	pending: new Map(),
 	footer: new WeakMap(),
-	routed: new Set(),
 	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
 	stores: new Set(),
 });
-// The object outlives /reload; a host made by an older build may lack newer fields.
-host.routed ??= new Set();
 
 /** Count one store's jobs for the footer. */
 export function count(jobs: Iterable<Notifiable>): Counts {
@@ -167,26 +162,13 @@ export function label(c: Counts, noun: string): string | undefined {
 }
 
 /**
- * zentui custom-value publisher protocol v1: a template that aliases `key` makes
- * the probe come back `active`. The probe is a plain object zentui mutates in
- * place; no listener means it stays false.
- */
-function templateWants(key: string): boolean {
-	const probe = { supported: false, active: false, key };
-	try {
-		(host.pi as any)?.events?.emit?.("zentui:variable-capability", probe);
-	} catch {
-		return false;
-	}
-	return probe.supported === true && probe.active === true;
-}
-
-/**
- * Footer: one plain, single-line value per key. The universal channel is
- * `ctx.ui.setStatus`, which every footer extension reads and places by key.
- * When a zentui template explicitly aliases the key, the value goes there as a
- * custom variable instead and the `setStatus` copy is cleared, so it never shows
- * twice. No ANSI, no timers; set only on change, removed when empty.
+ * Footer: one plain, single-line value per key, set only on change, removed
+ * when empty. No ANSI, no timers. Two channels, always both:
+ *  - `ctx.ui.setStatus(key)`: the contract every footer extension (Pi's own,
+ *    zentui, powerline, statusline, starship styles) reads and places by key.
+ *  - zentui custom-value protocol v1 under `variable`: ignored unless a starship
+ *    template aliases it. A user who aliases it turns the status key Off in
+ *    /zentui extensions, so it is not shown twice.
  */
 export function publish(): void {
 	const ctx = host.ctx;
@@ -199,17 +181,9 @@ export function publish(): void {
 			const { status, variable, noun } = FOOTER[k];
 			const text = label(counts[k], noun);
 			next[k] = text;
-			const routed = templateWants(variable);
-			const was = host.routed.has(variable);
-			if (routed) {
-				if (!was || prev[k] !== text) emit("zentui:variable", { key: variable, text });
-				if (!was && prev[k] !== undefined) ctx.ui.setStatus(status, undefined);
-				host.routed.add(variable);
-			} else {
-				if (was) emit("zentui:variable", { key: variable, text: undefined });
-				if (was || prev[k] !== text) ctx.ui.setStatus(status, text);
-				host.routed.delete(variable);
-			}
+			if (prev[k] === text) continue;
+			ctx.ui.setStatus(status, text);
+			emit("zentui:variable", { key: variable, text });
 		}
 		host.footer.set(ctx, next);
 	} catch {

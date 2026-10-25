@@ -84,7 +84,7 @@ A failure leaves the footer once it is read with `bg_logs`, killed, or delivered
 
 ### zentui templates
 
-The same values are also offered through zentui's custom-value publisher protocol v1 under the keys `pi-background:bg` and `pi-background:agents`. Alias one in a starship template and it moves there; the `setStatus` copy for that key is cleared so it is never shown twice. Remove the alias and it returns to `setStatus`. Nothing changes for footers that do not alias.
+The same values are also emitted through zentui's custom-value publisher protocol v1 under the keys `pi-background:bg` and `pi-background:agents`, every time they change. zentui ignores them unless a starship template aliases one. If you alias one, turn the matching status key (`bg` / `bg-agents`) Off in `/zentui extensions` so it is not shown twice.
 
 ```json
 {

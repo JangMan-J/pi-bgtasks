@@ -465,49 +465,19 @@ describe("footer", () => {
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
 		assert.equal(ctx.status.bg, undefined);
 	});
-	it("still publishes after a /reload that left an older host object behind", async () => {
-		const saved = host.routed;
-		(host as any).routed = undefined; // what a host built before this field looks like
-		try {
-			const mod = await import(`../src/host.ts?reload=${Date.now()}`);
-			assert.ok(host.routed instanceof Set, "module load migrates the surviving host");
-			const pi = mockPi();
-			backgroundExtension(pi as any);
-			const ctx = mockCtx(tmp(), { ui: true });
-			await pi.fire("session_start", {}, ctx);
-			const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
-			assert.equal(ctx.status.bg, "[~] 1 bg");
-			await shell.kill(t);
-			void mod;
-		} finally {
-			host.routed = saved ?? new Set();
-		}
-	});
-	it("routes a key to a zentui template when one aliases it, and never shows it twice", async () => {
+	it("offers the same value as a zentui variable without touching setStatus", async () => {
 		const pi = mockPi();
 		const seen: any[] = [];
-		let active = false;
-		(pi as any).events = {
-			emit(name: string, payload: any) {
-				if (name === "zentui:variable-capability" && payload?.key === "pi-background:bg") Object.assign(payload, { supported: true, version: 1, active });
-				if (name === "zentui:variable") seen.push(payload);
-			},
-		};
+		(pi as any).events = { emit: (name: string, payload: any) => void (name === "zentui:variable" && seen.push(payload)) };
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
 		assert.equal(ctx.status.bg, "[~] 1 bg");
-		assert.equal(seen.length, 0);
-		active = true;
-		const u = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
-		assert.equal(ctx.status.bg, undefined, "setStatus copy cleared once a template takes the key");
-		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: "[~] 2 bg" });
-		active = false;
-		await shell.kill(u);
-		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: undefined }, "variable removed when the template stops asking");
-		assert.equal(ctx.status.bg, "[~] 1 bg");
+		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: "[~] 1 bg" });
 		await shell.kill(t);
+		await until(() => ctx.status.bg === undefined);
+		assert.deepEqual(seen.at(-1), { key: "pi-background:bg", text: undefined });
 	});
 	it("oneLine strips control characters", () => assert.equal(oneLine("a\x1b]0;x\x07\nb"), "a ]0;x b"));
 });
