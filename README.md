@@ -72,26 +72,27 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 
 ## Footer
 
-Two single-line statuses through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Both keys are present from session start as a dim `icon 0`, so the footer keeps its shape when work begins; they are removed at session end. Set only on change. The spinner interval exists only while something is running.
+One status key, `bg`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
 
-| Key | Text | Means |
-| --- | --- | --- |
-| `bg` | ` 0` (dim) | idle |
-| `bg` | ` 2⠋` (blue) | two shell tasks running |
-| `bg` | ` 1` (red) | a task failed and nobody has read it or been woken with it yet |
-| `bg-agents` | ` 1⠋   1` (purple, red) | one subagent running, one unread failure |
+Two lanes inside it, shell tasks then subagents:
 
-A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. Themed footers place the two keys by name; zentui's per-key colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
+| Text | Means |
+| --- | --- |
+| ` 0   0` (dim) | idle |
+| ` 2⠋   1⠋` (blue, purple) | two shell tasks and one subagent running |
+| ` 0   1   0` | a shell task failed and nobody has read it or been woken with it yet (red) |
+
+A failure leaves the footer once it is read with `bg_logs`, killed, or delivered as a wake-up. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 
 ### zentui templates
 
-The same values are also emitted through zentui's custom-value publisher protocol v1 under the keys `pi-background:bg` and `pi-background:agents`, every time they change. zentui ignores them unless a starship template aliases one. If you alias one, turn the matching status key (`bg` / `bg-agents`) Off in `/zentui extensions` so it is not shown twice.
+The same text is also emitted through zentui's custom-value publisher protocol v1 under `pi-background:bg`, every time it changes. zentui ignores it unless a starship template aliases it. If you alias it, turn the `bg` status key Off in `/zentui extensions` so it is not shown twice.
 
 ```json
 {
   "components": { "footer": { "styles": { "starship": {
-    "variables": { "bg": "pi-background:bg", "agents": "pi-background:agents" },
-    "compactFormat": "$cwd$wrap(on $git_branch)$wrap($bg)($sep$agents)$wrap_sep$tokens"
+    "variables": { "bg": "pi-background:bg" },
+    "compactFormat": "$cwd$wrap(on $git_branch)$wrap($bg)$wrap_sep$tokens"
   } } } }
 }
 ```

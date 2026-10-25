@@ -447,16 +447,15 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		assert.equal(strip(ctx.status.bg), "\uf120 0");
-		assert.equal(strip(ctx.status["bg-agents"]), "\uf21b 0");
+		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf21b 0", "one key carries both lanes");
+		assert.equal(ctx.status["bg-agents"], undefined, "no second key to place");
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
 		assert.match(ctx.status.bg!, /\uf120 1⠋/);
 		await shell.kill(t);
-		await until(() => strip(ctx.status.bg) === "\uf120 0");
+		await until(() => strip(ctx.status.bg) === "\uf120 0  \uf21b 0");
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
 		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
 		assert.equal(ctx.status.bg, undefined);
-		assert.equal(ctx.status["bg-agents"], undefined);
 		assert.equal(host.spinner, undefined);
 	});
 	it("labels running with a spinner and unread failures in red, and clears a failure once it is read", async () => {
@@ -475,10 +474,10 @@ describe("footer", () => {
 		assert.ok(host.spinner, "spinner runs while a task runs");
 		await until(() => t.status === "failed");
 		assert.equal(host.spinner, undefined, "spinner stops when nothing runs");
-		assert.equal(strip(ctx.status.bg), "\uf120 0  \uf071 1");
+		assert.match(strip(ctx.status.bg)!, /^\uf120 0  \uf071 1  \uf21b 0/);
 		assert.deepEqual(count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.equal(strip(ctx.status.bg), "\uf120 0");
+		assert.match(strip(ctx.status.bg)!, /^\uf120 0  \uf21b 0/);
 	});
 	it("offers the same value as a zentui variable without touching setStatus", async () => {
 		const pi = mockPi();

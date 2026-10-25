@@ -27,7 +27,8 @@ interface Host {
 	pi?: ExtensionAPI;
 	ctx?: ExtensionContext;
 	pending: Map<string, Entry>;
-	footer: WeakMap<object, Record<string, string | undefined>>;
+	/** Last text published per UI context, so unchanged frames are not re-sent. */
+	footer: WeakMap<object, string>;
 	/** Spinner: current frame and the interval driving it while anything runs. */
 	frame: number;
 	spinner?: ReturnType<typeof setInterval>;
@@ -173,13 +174,16 @@ export function flush(): void {
 }
 
 /**
- * Footer keys. `status` is the `ctx.ui.setStatus` key every footer extension
- * (zentui, powerline, statusline, Pi's own) places and colours by name.
+ * One footer key for the whole extension, so a user places it once. `status`
+ * is the `ctx.ui.setStatus` key every footer extension (Pi's own, zentui,
+ * powerline, statusline, starship styles) places and colours by name;
  * `variable` is the zentui custom-value key a starship template can alias.
+ * Two lanes inside it: shell tasks and subagents.
  */
-export const FOOTER = {
-	bg: { status: "bg", variable: "pi-background:bg", icon: "\uf120", code: 45 },
-	agents: { status: "bg-agents", variable: "pi-background:agents", icon: "\uf21b", code: 141 },
+export const FOOTER = { status: "bg", variable: "pi-background:bg" } as const;
+export const LANES = {
+	bg: { icon: "\uf120", code: 45 },
+	agents: { icon: "\uf21b", code: 141 },
 } as const;
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -200,15 +204,20 @@ export function label(c: Counts, icon: string, code: number, frame = 0): string 
 	return parts.join("  ");
 }
 
+/** The one status line: shell lane, then agent lane. */
+export function compose(counts: { bg: Counts; agents: Counts }, frame = 0): string {
+	return [label(counts.bg, LANES.bg.icon, LANES.bg.code, frame), label(counts.agents, LANES.agents.icon, LANES.agents.code, frame)].join("  ");
+}
+
 /**
- * Footer: one single-line value per key, always present while the session is
- * open, set only on change. A spinner timer runs only while something is
- * running. Two channels, always both:
- *  - `ctx.ui.setStatus(key)`: the contract every footer extension (Pi's own,
+ * Footer: one single-line value under one key, always present while the
+ * session is open, set only on change. A spinner timer runs only while
+ * something is running. Two channels, always both:
+ *  - `ctx.ui.setStatus("bg")`: the contract every footer extension (Pi's own,
  *    zentui, powerline, statusline, starship styles) reads and places by key.
- *  - zentui custom-value protocol v1 under `variable`: ignored unless a starship
- *    template aliases it. A user who aliases it turns the status key Off in
- *    /zentui extensions, so it is not shown twice.
+ *  - zentui custom-value protocol v1 under `pi-background:bg`: ignored unless a
+ *    starship template aliases it. A user who aliases it turns the `bg` status
+ *    key Off in /zentui extensions, so it is not shown twice.
  */
 export function publish(): void {
 	const ctx = host.ctx;
@@ -216,17 +225,11 @@ export function publish(): void {
 		if (!ctx?.hasUI || host.closed) return;
 		const counts = host.counts();
 		spin(counts.bg.running + counts.agents.running > 0);
-		const prev = host.footer.get(ctx) ?? {};
-		const next: Record<string, string | undefined> = {};
-		for (const k of ["bg", "agents"] as const) {
-			const { status, variable, icon, code } = FOOTER[k];
-			const text = label(counts[k], icon, code, host.frame);
-			next[k] = text;
-			if (prev[k] === text) continue;
-			ctx.ui.setStatus(status, text);
-			emit("zentui:variable", { key: variable, text });
-		}
-		host.footer.set(ctx, next);
+		const text = compose(counts, host.frame);
+		if (host.footer.get(ctx) === text) return;
+		host.footer.set(ctx, text);
+		ctx.ui.setStatus(FOOTER.status, text);
+		emit("zentui:variable", { key: FOOTER.variable, text });
 	} catch {
 		// Stale or closing UI: nothing to update.
 	}
@@ -239,10 +242,8 @@ export function clear(): void {
 	const ctx = host.ctx;
 	try {
 		if (!ctx?.hasUI) return;
-		for (const k of ["bg", "agents"] as const) {
-			ctx.ui.setStatus(FOOTER[k].status, undefined);
-			emit("zentui:variable", { key: FOOTER[k].variable, text: undefined });
-		}
+		ctx.ui.setStatus(FOOTER.status, undefined);
+		emit("zentui:variable", { key: FOOTER.variable, text: undefined });
 		host.footer.delete(ctx);
 	} catch {
 		// UI already gone.
