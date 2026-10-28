@@ -3,8 +3,8 @@ import { appendFileSync, closeSync, lstatSync, mkdirSync, openSync, rmSync, stat
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { emit, host, notification, publish, taken, terminal } from "./host.ts";
-import { duration, newId, oneLine, readTail, stateLabel, type Status } from "./kit.ts";
+import * as jobs from "./jobs.ts";
+import { duration, notification, oneLine, readTail, stateLabel, type Status } from "./kit.ts";
 
 // Wire protocol v1: other extensions read these without importing this package.
 export const TASKS_KEY = Symbol.for("jang.pi.bg.tasks.v1");
@@ -13,7 +13,6 @@ export const CHANGED = "bg-tasks:changed";
 export const TERMINAL = "bg-tasks:terminal";
 
 export const MAX_RUNNING = 16;
-const KEEP_FINISHED = 32;
 const KILL_GRACE_MS = 1500;
 
 export interface ShellTask {
@@ -36,70 +35,7 @@ export interface ShellTask {
 }
 export type ShellSnapshot = Omit<ShellTask, "proc" | "timer">;
 
-const g = globalThis as Record<symbol, any>;
-export const tasks: Map<string, ShellTask> = (g[TASKS_KEY] ??= new Map());
-host.stores.add(tasks);
 const snap = ({ proc: _p, timer: _t, ...rest }: ShellTask): ShellSnapshot => ({ ...rest });
-g[SERVICE_KEY] = {
-	version: 1,
-	store: tasks,
-	list: () => [...tasks.values()].map(snap),
-	get: (id: string) => {
-		const t = tasks.get(id) ?? [...tasks.values()].find((x) => x.id.startsWith(id));
-		if (!t) throw new Error(`Unknown background task "${id}"`);
-		return snap(t);
-	},
-};
-
-export const running = () => [...tasks.values()].filter((t) => t.status === "running");
-
-function logDir(): string {
-	const dir = process.env.PI_BG_LOG_DIR?.trim() || join(tmpdir(), `pi-bg-tasks-${process.getuid?.() ?? "u"}`);
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	// Refuse a directory someone else planted: symlink or foreign owner.
-	const st = lstatSync(dir);
-	if (!st.isDirectory() || (process.getuid && st.uid !== process.getuid())) {
-		throw new Error(`Unsafe log directory ${dir}`);
-	}
-	return dir;
-}
-
-function signal(pid: number, sig: NodeJS.Signals): void {
-	try {
-		process.kill(-pid, sig);
-	} catch {
-		try {
-			process.kill(pid, sig);
-		} catch {
-			// already gone
-		}
-	}
-}
-
-/** SIGTERM the process group; SIGKILL after a grace period. Resolves when it exits. */
-export function killGroup(t: ShellTask): Promise<void> {
-	const { proc, pid } = t;
-	if (!pid || !proc || proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-	return new Promise((resolve) => {
-		const hard = setTimeout(() => {
-			signal(pid, "SIGKILL");
-			resolve();
-		}, KILL_GRACE_MS);
-		proc.once("close", () => {
-			clearTimeout(hard);
-			resolve();
-		});
-		signal(pid, "SIGTERM");
-	});
-}
-
-// Detached groups outlive pi if it dies without shutdown hooks; kill them on exit.
-if (!g[Symbol.for("jang.pi.bg.exit.v1")]) {
-	g[Symbol.for("jang.pi.bg.exit.v1")] = true;
-	process.once("exit", () => {
-		for (const t of running()) if (t.pid) signal(t.pid, "SIGKILL");
-	});
-}
 
 export function summary(t: ShellTask | ShellSnapshot): string {
 	const took = duration((t.completedAt ?? Date.now()) - t.startedAt);
@@ -130,26 +66,87 @@ function message(t: ShellTask) {
 	};
 }
 
+function signal(pid: number, sig: NodeJS.Signals): void {
+	try {
+		process.kill(-pid, sig);
+	} catch {
+		try {
+			process.kill(pid, sig);
+		} catch {
+			// already gone
+		}
+	}
+}
+
+/** SIGTERM the process group; SIGKILL after a grace period. Resolves when it exits. */
+function killGroup(t: ShellTask): Promise<void> {
+	const { proc, pid } = t;
+	if (!pid || !proc || proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+	return new Promise((resolve) => {
+		const hard = setTimeout(() => {
+			signal(pid, "SIGKILL");
+			resolve();
+		}, KILL_GRACE_MS);
+		proc.once("close", () => {
+			clearTimeout(hard);
+			resolve();
+		});
+		signal(pid, "SIGTERM");
+	});
+}
+
+const lane = jobs.lane<ShellTask>({
+	name: "bg",
+	key: TASKS_KEY,
+	events: { changed: CHANGED, terminal: TERMINAL, field: "task" },
+	snapshot: snap,
+	summary,
+	read(t, o) {
+		const tail = readTail(t.logPath, o.maxBytes, o.tailLines ?? 80);
+		return `${summary(t)}\n\n--- Output tail (${tail.totalBytes} bytes total${tail.truncated ? ", truncated" : ""}) ---\n${tail.text}`;
+	},
+	message,
+	stop: killGroup,
+	forget: (t) => rmSync(t.logPath, { force: true }),
+});
+
+export const tasks = lane.store;
+export const running = lane.running;
+
+const g = globalThis as Record<symbol, any>;
+g[SERVICE_KEY] = {
+	version: 1,
+	store: tasks,
+	list: () => [...tasks.values()].map(snap),
+	get: (id: string) => snap(lane.get(id)),
+};
+
+// Detached groups outlive pi if it dies without shutdown hooks; kill them on exit.
+if (!g[Symbol.for("jang.pi.bg.exit.v1")]) {
+	g[Symbol.for("jang.pi.bg.exit.v1")] = true;
+	process.once("exit", () => {
+		for (const t of running()) if (t.pid) signal(t.pid, "SIGKILL");
+	});
+}
+
+function logDir(): string {
+	const dir = process.env.PI_BG_LOG_DIR?.trim() || join(tmpdir(), `pi-bg-tasks-${process.getuid?.() ?? "u"}`);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	// Refuse a directory someone else planted: symlink or foreign owner.
+	const st = lstatSync(dir);
+	if (!st.isDirectory() || (process.getuid && st.uid !== process.getuid())) {
+		throw new Error(`Unsafe log directory ${dir}`);
+	}
+	return dir;
+}
+
 function finish(t: ShellTask, code: number | null, sig: NodeJS.Signals | null): void {
 	if (t.completedAt) return; // 'error' and 'close' can both fire
 	clearTimeout(t.timer);
 	t.timer = undefined;
-	t.completedAt = Date.now();
 	t.exitCode = code;
 	t.signal = sig;
-	if (t.status === "running") t.status = code === 0 ? "completed" : "failed";
-	publish();
-	emit(CHANGED, { version: 1, task: snap(t) });
-	emit(TERMINAL, { version: 1, task: snap(t) });
-	terminal(t, () => message(t));
-}
-
-function prune(): void {
-	const done = [...tasks.values()].filter((t) => t.status !== "running").sort((a, b) => a.completedAt! - b.completedAt!);
-	for (const t of done.slice(0, Math.max(0, done.length - KEEP_FINISHED))) {
-		tasks.delete(t.id);
-		rmSync(t.logPath, { force: true });
-	}
+	lane.settle(t, code === 0 ? "completed" : "failed");
 }
 
 export interface StartOptions {
@@ -170,8 +167,7 @@ export function start(ctx: ExtensionContext, o: StartOptions): ShellTask {
 		throw new Error("timeoutSeconds must be a positive number");
 	}
 
-	prune();
-	const id = newId(taken);
+	const id = jobs.newId();
 	const logPath = join(logDir(), `${id}.log`);
 	const fd = openSync(logPath, "a", 0o600);
 	let proc: ChildProcess;
@@ -199,9 +195,11 @@ export function start(ctx: ExtensionContext, o: StartOptions): ShellTask {
 		proc,
 	};
 	if (o.timeoutSeconds) {
+		// A timeout is not a user kill: the task ends "killed" and still wakes.
 		t.timer = setTimeout(() => {
 			if (t.status !== "running") return;
 			t.status = "killed";
+			lane.changed(t);
 			void killGroup(t);
 		}, o.timeoutSeconds * 1000);
 		t.timer.unref();
@@ -217,23 +215,6 @@ export function start(ctx: ExtensionContext, o: StartOptions): ShellTask {
 	});
 	proc.once("close", (code, sig) => finish(t, code, sig));
 
-	tasks.set(id, t);
-	publish();
-	emit(CHANGED, { version: 1, task: snap(t) });
+	lane.add(t);
 	return t;
-}
-
-/** User/agent-requested stop: no wake-up, result counts as seen. */
-export async function kill(t: ShellTask): Promise<void> {
-	if (t.status === "running") {
-		t.status = "killed";
-		t.notifyOnCompletion = false;
-		await killGroup(t);
-	}
-	t.resultObservedAt ??= Date.now();
-	publish();
-}
-
-export async function killAll(): Promise<void> {
-	await Promise.all(running().map(kill));
 }

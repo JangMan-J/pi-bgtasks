@@ -2,8 +2,9 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { emit, host, publish, taken, terminal } from "./host.ts";
-import { duration, escapeXml, newId, oneLine, stateLabel, type Status } from "./kit.ts";
+import * as jobs from "./jobs.ts";
+import { duration, escapeXml, oneLine, stateLabel, type Status } from "./kit.ts";
+import { scheduler } from "./scheduler.ts";
 
 // ---------------------------------------------------------------------------
 // Declarations: a subagent exists only if a file declares it completely.
@@ -14,6 +15,7 @@ export const OWN_TOOLS = ["subagent", "bg_run", "bg_logs", "bg_kill"];
 export const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const DEFAULT_MAX_TURNS = 30;
 export const MAX_RUNNING = 4;
+const KILL_WAIT_MS = 5000;
 const MAX_RESULT = 32 * 1024;
 const KEYS = ["description", "tools", "model", "thinking", "max_turns"];
 
@@ -85,7 +87,7 @@ export function parseDeclaration(name: string, text: string): Declaration | stri
 	return { name, description, tools: [...new Set(tools)], model, thinking, maxTurns, systemPrompt: body };
 }
 
-export function agentDirs(cwd: string): string[] {
+function agentDirs(cwd: string): string[] {
 	const global = join(process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"), "agents");
 	return [global, join(cwd, ".pi", "agents")]; // later wins
 }
@@ -191,15 +193,38 @@ export interface AgentRun {
 	notificationDeliveredAt: number | null;
 	session?: ChildSession;
 	abort?: AbortController;
+	/** Resolves when the run has finished, or was withdrawn before it started. */
 	done?: Promise<void>;
 }
 export type AgentSnapshot = Omit<AgentRun, "session" | "abort" | "done">;
 
-const g = globalThis as Record<symbol, any>;
-export const runs: Map<string, AgentRun> = (g[AGENTS_KEY] ??= new Map());
-host.stores.add(runs);
 const snap = ({ session: _s, abort: _a, done: _d, ...rest }: AgentRun): AgentSnapshot => ({ ...rest });
-export const running = () => [...runs.values()].filter((r) => r.status === "running");
+
+const lane = jobs.lane<AgentRun>({
+	name: "agents",
+	key: AGENTS_KEY,
+	events: { changed: CHANGED, terminal: TERMINAL, field: "run" },
+	snapshot: snap,
+	summary,
+	read: (r) => report(r),
+	message,
+	stop,
+});
+export const runs = lane.store;
+export const running = lane.running;
+
+export const MAX_QUEUED = 64;
+/** Subagent slots, shared across reloads. Tests lower the limit with `queue.setLimit`. */
+export const queue = scheduler<AgentRun>({
+	key: Symbol.for("jang.pi.bg.queue.v1"),
+	max: MAX_RUNNING,
+	begin(r) {
+		r.status = "running";
+		lane.changed(r);
+	},
+	// Runs an older build started before a /reload still hold their slots.
+	foreign: () => running().map((r) => ({ job: r, done: r.done })),
+});
 
 /** The slice of an SDK AgentSession this module uses. */
 export interface ChildSession {
@@ -224,7 +249,7 @@ export const CHILD_KEY = Symbol.for("jang.pi.bg.child.v1");
 export const buildingChild = () => ((globalThis as any)[CHILD_KEY] ?? 0) > 0;
 
 /** Real session factory. The SDK is imported lazily so loading this extension never fails on it. */
-export const sdkFactory: Factory = {
+const sdkFactory: Factory = {
 	async create(ctx, d, model) {
 		const g = globalThis as any;
 		g[CHILD_KEY] = (g[CHILD_KEY] ?? 0) + 1;
@@ -318,7 +343,8 @@ export function report(r: AgentRun | AgentSnapshot, max = MAX_RESULT): string {
 		`${r.model} · ${r.turns} turn${r.turns === 1 ? "" : "s"} · ${r.toolCalls} tool call${r.toolCalls === 1 ? "" : "s"} · ${took}`,
 	];
 	if (r.note) lines.push(r.note);
-	if (r.status === "running") lines.push("", "Still running; no result yet.");
+	if (r.status === "queued") lines.push("", "Queued; waiting for a running slot.");
+	else if (r.status === "running") lines.push("", "Still running; no result yet.");
 	else {
 		const answer = r.result.slice(0, max);
 		if (r.status === "completed" && !answer.trim()) {
@@ -364,6 +390,7 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 	});
 	const onAbort = () => void session.abort().catch(() => {});
 	r.abort!.signal.addEventListener("abort", onAbort, { once: true });
+	if (r.abort!.signal.aborted) onAbort(); // killed after the session was built, before this listener
 	try {
 		await session.prompt(prompt, { expandPromptTemplates: false });
 	} catch (e) {
@@ -379,10 +406,10 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 	}
 	r.resultChars = full.length;
 	r.result = full.slice(0, MAX_RESULT);
-	if (r.abort!.signal.aborted) r.status = "killed";
-	else if (limited) [r.status, r.error] = ["failed", `max_turns (${d.maxTurns}) reached`];
-	else if (failure) [r.status, r.error] = ["failed", failure];
-	else r.status = "completed";
+	let status: "completed" | "failed" | "killed" = "completed";
+	if (r.abort!.signal.aborted) status = "killed";
+	else if (limited) [status, r.error] = ["failed", `max_turns (${d.maxTurns}) reached`];
+	else if (failure) [status, r.error] = ["failed", failure];
 	r.abort!.signal.removeEventListener("abort", onAbort);
 	unsub();
 	try {
@@ -391,11 +418,7 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 		// already disposed
 	}
 	r.session = undefined;
-	r.completedAt = Date.now();
-	publish();
-	emit(CHANGED, { version: 1, run: snap(r) });
-	emit(TERMINAL, { version: 1, run: snap(r) });
-	terminal(r, () => message(r));
+	lane.settle(r, status);
 }
 
 export interface SpawnOptions {
@@ -410,24 +433,17 @@ export interface SpawnOptions {
 	signal?: AbortSignal;
 }
 
-function prune(): void {
-	const done = [...runs.values()].filter((r) => r.status !== "running").sort((a, b) => a.completedAt! - b.completedAt!);
-	for (const r of done.slice(0, Math.max(0, done.length - 32))) runs.delete(r.id);
-}
-
 export async function spawn(ctx: ExtensionContext, d: Declaration, o: SpawnOptions): Promise<AgentRun> {
 	const prompt = o.prompt?.trim();
 	if (!prompt) throw new Error("prompt is empty");
-	if (running().length >= MAX_RUNNING) throw new Error(`Too many running subagents (max ${MAX_RUNNING}). Wait or bg_kill one.`);
+	if (queue.waiting().length >= MAX_QUEUED) throw new Error(`Subagent queue full (max ${MAX_QUEUED}).`);
 	const { model, label } = resolveModel(ctx, d);
-	// Reserve the slot before the async session build so concurrent calls cannot exceed the cap.
-	prune();
 	const r: AgentRun = {
-		id: newId(taken),
+		id: jobs.newId(),
 		agent: d.name,
 		name: oneLine(o.description ?? "") || oneLine(prompt, 40),
 		model: label,
-		status: "running",
+		status: "queued",
 		background: o.background,
 		startedAt: Date.now(),
 		completedAt: null,
@@ -442,59 +458,57 @@ export async function spawn(ctx: ExtensionContext, d: Declaration, o: SpawnOptio
 		notificationDeliveredAt: null,
 		abort: new AbortController(),
 	};
-	runs.set(r.id, r);
-	publish();
-	let session: ChildSession;
-	try {
-		session = await factory.create(ctx, d, model);
-	} catch (e) {
-		runs.delete(r.id);
-		publish();
-		throw new Error(`Agent "${d.name}": could not start: ${e instanceof Error ? e.message : e}`);
+	lane.add(r);
+	const create = factory; // the factory at request time, even when the run starts later
+	r.done = queue.submit(r, () => run(r, create, ctx, d, model, prompt));
+	if (o.signal && !o.background) {
+		const onAbort = () => void jobs.kill(r);
+		o.signal.addEventListener("abort", onAbort, { once: true });
+		void r.done.then(() => o.signal!.removeEventListener("abort", onAbort));
 	}
-	if (r.abort!.signal.aborted) {
-		// Killed while the session was being built.
-		try {
-			session.dispose();
-		} catch {
-			// ignore
-		}
-		r.status = "killed";
-		r.completedAt = Date.now();
-		publish();
-		return r;
-	}
-	r.session = session;
-	emit(CHANGED, { version: 1, run: snap(r) });
-	r.done = drive(r, session, d, prompt).catch((e) => {
-		if (r.status !== "running") return;
-		r.status = "failed";
-		r.error = e instanceof Error ? e.message : String(e);
-		r.completedAt = Date.now();
-		publish();
-		terminal(r, () => message(r));
-	});
-	if (o.signal) {
-		if (o.signal.aborted) r.abort!.abort();
-		else if (!o.background) o.signal.addEventListener("abort", () => r.abort!.abort(), { once: true });
-	}
+	if (o.signal?.aborted) await jobs.kill(r);
 	return r;
 }
 
-/** Stop a run. No wake-up; the result counts as seen. Waits briefly for teardown. */
-export async function kill(r: AgentRun): Promise<void> {
-	if (r.status === "running") {
-		r.notifyOnCompletion = false;
-		r.abort?.abort();
-		await Promise.race([r.done, new Promise((res) => setTimeout(res, 5000).unref())]);
-		if (r.status === "running") r.status = "killed"; // teardown wedged: report the intent
+/** A run's work, from building its session to settling. It holds a scheduler slot throughout. */
+async function run(r: AgentRun, create: Factory, ctx: ExtensionContext, d: Declaration, model: unknown, prompt: string): Promise<void> {
+	try {
+		const session = await create.create(ctx, d, model);
+		if (r.abort!.signal.aborted) {
+			try {
+				session.dispose();
+			} catch {
+				// already disposed
+			}
+			lane.settle(r, "killed");
+			return;
+		}
+		r.session = session;
+		lane.changed(r);
+		await drive(r, session, d, prompt);
+	} catch (e) {
+		try {
+			r.session?.dispose();
+		} catch {
+			// already disposed
+		}
+		r.session = undefined;
+		if (r.completedAt) return;
+		r.error = `could not run: ${e instanceof Error ? e.message : e}`;
+		lane.settle(r, r.abort!.signal.aborted ? "killed" : "failed");
 	}
-	r.resultObservedAt ??= Date.now();
-	publish();
 }
 
-export async function killAll(): Promise<void> {
-	await Promise.all(running().map(kill));
+/**
+ * The lane's stop: withdraw a waiting run, or abort a running one and wait
+ * briefly for teardown. A teardown that hangs still ends the run as killed;
+ * its slot stays held until the work really returns.
+ */
+async function stop(r: AgentRun): Promise<void> {
+	r.abort?.abort();
+	if (queue.withdraw(r)) return lane.settle(r, "killed");
+	if (r.done) await Promise.race([r.done, new Promise((res) => setTimeout(res, KILL_WAIT_MS).unref())]);
+	lane.settle(r, "killed");
 }
 
 export function summary(r: AgentRun | AgentSnapshot): string {

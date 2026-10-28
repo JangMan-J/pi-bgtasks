@@ -1,5 +1,5 @@
 {
-  "name": "pi-background",
+  "name": "pi-bgtasks",
   "version": "0.1.0",
   "description": "Background shell tasks and declared in-process subagents for Pi: bg_run, bg_logs, bg_kill, subagent.",
   "type": "module",

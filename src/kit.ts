@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
-export type Status = "running" | "completed" | "failed" | "killed";
+export type Status = "queued" | "running" | "completed" | "failed" | "killed";
 
 /** Fields the notifier needs. Names match the published v1 task protocol. */
 export interface Notifiable {
@@ -11,6 +11,21 @@ export interface Notifiable {
 	resultObservedAt?: number | null;
 	notificationDeliveredAt?: number | null;
 }
+
+/** A background job of any lane, as the job ledger sees it. */
+export interface Job extends Notifiable {
+	name: string;
+	startedAt: number;
+	completedAt: number | null;
+}
+
+type Stamped = { status: Status; resultObservedAt?: number | null; notificationDeliveredAt?: number | null };
+
+/** In flight: queued or running, so there is no result yet. */
+export const live = (j: { status: Status }) => j.status === "queued" || j.status === "running";
+
+/** The one definition of unread: finished, and the result has reached the model neither through bg_logs nor as a wake-up. */
+export const unread = (j: Stamped) => !live(j) && !j.resultObservedAt && !j.notificationDeliveredAt;
 
 // Minimal TypeBox-compatible schema builders: no runtime dependency.
 const KIND = Symbol.for("TypeBox.Kind");
@@ -28,8 +43,8 @@ export const Type = {
 };
 
 /** Status plus whether a finished result has reached the model yet (read with bg_logs, or delivered as a wake-up). */
-export function stateLabel(j: { status: Status; resultObservedAt?: number | null; notificationDeliveredAt?: number | null }): string {
-	return j.status !== "running" && !j.resultObservedAt && !j.notificationDeliveredAt ? `${j.status}, unread` : j.status;
+export function stateLabel(j: Stamped): string {
+	return unread(j) ? `${j.status}, unread` : j.status;
 }
 
 export function newId(taken: (id: string) => boolean): string {
@@ -59,12 +74,24 @@ export function escapeXml(s: string): string {
 	return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/** An XML-tagged wake-up body: escaped header fields, then one escaped body element. */
+export function notification(
+	tag: string,
+	fields: Record<string, string | number | null>,
+	bodyTag: string,
+	body: string,
+	truncated: boolean,
+): string {
+	const head = Object.entries(fields).map(([k, v]) => `<${k}>${escapeXml(String(v))}</${k}>`);
+	return [`<${tag}>`, ...head, `<${bodyTag}${truncated ? ' truncated="true"' : ""}>`, escapeXml(body), `</${bodyTag}>`, `</${tag}>`].join("\n");
+}
+
 export function duration(ms: number): string {
 	const s = Math.max(0, Math.round(ms / 1000));
 	return s < 60 ? `${s}s` : s % 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s / 60}m`;
 }
 
-export const MAX_TAIL = 64 * 1024;
+const MAX_TAIL = 64 * 1024;
 
 /** Last `maxBytes` (clamped to 512..64KiB) and optionally last `maxLines` lines of a file. */
 export function readTail(path: string, maxBytes = 16 * 1024, maxLines?: number) {

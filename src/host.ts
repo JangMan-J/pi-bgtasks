@@ -1,250 +1,44 @@
 /**
- * Shared host state: the live `pi`/`ctx`, queued notifications, and footer
- * publishing. It lives on globalThis so child-process and session callbacks
- * created before a /reload reach the *current* extension instance instead of
- * a stale one.
+ * The one place that owns state outliving a /reload: the bound Pi session,
+ * pending wake-ups and footer state, on globalThis. Child-process and session
+ * callbacks created before a /reload therefore reach the *current* session.
+ * Builds the wake-up notifier and the footer over that state, through the real
+ * Pi port.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { escapeXml, type Notifiable } from "./kit.ts";
+import { createFooter, type FooterState, type LaneCounts } from "./footer.ts";
+import { createNotifier, type NotifierState } from "./notifier.ts";
+import { piPort } from "./port.ts";
 
-export interface Message {
-	customType: "bg-notification";
-	content: string;
-	/** Never shown in the transcript: the footer is the user's signal, the content is the model's. */
-	display: false;
-	details: { kind: "shell" | "agent"; id: string; name: string; status: string };
-}
-
-interface Entry {
-	job: Notifiable;
-	build: () => Message;
-}
-/** Per kind: running now, and failures nobody has read or been woken with. */
-export interface Counts {
-	running: number;
-	failedUnread: number;
-}
-interface Host {
+interface Host extends NotifierState, FooterState {
 	pi?: ExtensionAPI;
 	ctx?: ExtensionContext;
-	pending: Map<string, Entry>;
-	/** Last text published per UI context, so unchanged frames are not re-sent. */
-	footer: WeakMap<object, string>;
-	/** Spinner: current frame and the interval driving it while anything runs. */
-	frame: number;
+	/** Footer counts per lane; the extension entry installs the job ledger's. */
+	counts: () => LaneCounts;
+	/** Older builds kept the spinner's interval handle here. */
 	spinner?: ReturnType<typeof setInterval>;
-	/** Set while the session shuts down, so late callbacks do not repaint a cleared footer. */
-	closed?: boolean;
-	counts: () => { bg: Counts; agents: Counts };
-	/** Every job store, so ids stay unique across shell tasks and subagents. */
-	stores: Set<Map<string, unknown>>;
 }
 
 const KEY = Symbol.for("jang.pi.bg.host.v1");
-export const host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
+const idle = () => ({ running: 0, failedUnread: 0 });
+export const host: Host = ((globalThis as Record<symbol, Host>)[KEY] ??= {
 	pending: new Map(),
 	footer: new WeakMap(),
 	frame: 0,
-	counts: () => ({ bg: { running: 0, failedUnread: 0 }, agents: { running: 0, failedUnread: 0 } }),
-	stores: new Set(),
+	counts: () => ({ bg: idle(), agents: idle() }),
 });
 
-/** Count one store's jobs for the footer. */
-export function count(jobs: Iterable<Notifiable>): Counts {
-	const c: Counts = { running: 0, failedUnread: 0 };
-	for (const j of jobs) {
-		if (j.status === "running") c.running++;
-		else if (j.status === "failed" && !j.resultObservedAt && !j.notificationDeliveredAt) c.failedUnread++;
-	}
-	return c;
-}
-
-host.frame ??= 0; // the object outlives /reload; older builds lack this field
-// A /reload loads this module again: take the spinner over so the old module's
-// interval stops driving the footer. The first publish() restarts it if needed.
+// The object outlives /reload: fill what older builds lacked, stop their spinner.
+host.pending ??= new Map();
+host.footer ??= new WeakMap();
+host.frame ??= 0;
 if (host.spinner) {
 	clearInterval(host.spinner);
 	host.spinner = undefined;
 }
 
-/** Start the spinner while anything runs; stop and reset it when nothing does. */
-function spin(busy: boolean): void {
-	if (busy && !host.spinner) {
-		host.spinner = setInterval(() => {
-			host.frame = (host.frame + 1) % FRAMES.length;
-			publish();
-		}, SPIN_MS);
-		host.spinner.unref?.();
-	} else if (!busy && host.spinner) {
-		clearInterval(host.spinner);
-		host.spinner = undefined;
-		host.frame = 0;
-	}
-}
-
-export const taken = (id: string) => [...host.stores].some((m) => m.has(id));
-
-export function emit(event: string, payload: unknown): void {
-	try {
-		(host.pi as any)?.events?.emit?.(event, payload);
-	} catch {
-		// Event bus unavailable (stale instance, tests).
-	}
-}
-
-export function notification(
-	tag: "background-task-notification",
-	fields: Record<string, string | number | null>,
-	bodyTag: string,
-	body: string,
-	truncated: boolean,
-): string {
-	const head = Object.entries(fields).map(([k, v]) => `<${k}>${escapeXml(String(v))}</${k}>`);
-	return [
-		`<${tag}>`,
-		...head,
-		`<${bodyTag}${truncated ? ' truncated="true"' : ""}>`,
-		escapeXml(body),
-		`</${bodyTag}>`,
-		`</${tag}>`,
-	].join("\n");
-}
-
-const due = (j: Notifiable) =>
-	j.notifyOnCompletion && j.status !== "running" && !j.resultObservedAt && !j.notificationDeliveredAt;
-
-/** The agent has seen this result (bg_logs); suppress its wake. */
-export function observed(job: Notifiable): void {
-	if (job.status === "running") return;
-	job.resultObservedAt ??= Date.now();
-	host.pending.delete(job.id);
-	publish(); // a read failure leaves the footer
-}
-
-function idle(): boolean {
-	try {
-		return host.ctx?.isIdle?.() ?? true;
-	} catch {
-		return true;
-	}
-}
-
-function send(e: Entry): void {
-	const { job } = e;
-	job.notificationDeliveredAt = Date.now();
-	host.pending.delete(job.id);
-	const undo = () => {
-		job.notificationDeliveredAt = null;
-		host.pending.set(job.id, e);
-	};
-	try {
-		const r: any = host.pi?.sendMessage(e.build(), { triggerTurn: true, deliverAs: "followUp" });
-		if (r && typeof r.catch === "function") r.catch(undo);
-		else if (!host.pi) undo();
-	} catch {
-		undo();
-	}
-}
-
-/** A job reached a terminal state. Wake the agent now if idle, else at the next boundary. */
-export function terminal(job: Notifiable, build: () => Message): void {
-	if (!due(job)) return;
-	if (idle()) send({ job, build });
-	else host.pending.set(job.id, { job, build });
-}
-
-/** Turn-boundary injection: results ride the current run and force one more request. */
-export function boundary() {
-	const entries: Array<Record<string, unknown>> = [];
-	for (const [id, e] of [...host.pending]) {
-		host.pending.delete(id);
-		if (!due(e.job)) continue;
-		e.job.notificationDeliveredAt = Date.now();
-		entries.push({ type: "custom_message", ...e.build() });
-	}
-	return entries.length ? { entries, continue: true } : undefined;
-}
-
-/** Run settled normally: wake for anything still queued. */
-export function flush(): void {
-	for (const e of [...host.pending.values()]) {
-		if (due(e.job)) send(e);
-		else host.pending.delete(e.job.id);
-	}
-}
-
-/**
- * One footer key for the whole extension, so a user places it once. `status`
- * is the `ctx.ui.setStatus` key every footer extension (Pi's own, zentui,
- * powerline, statusline, starship styles) places and colours by name;
- * `variable` is the zentui custom-value key a starship template can alias.
- * Two lanes inside it: shell tasks and subagents.
- */
-export const FOOTER = { status: "bg", variable: "pi-background:bg" } as const;
-export const LANES = {
-	bg: { icon: "\uf489", code: 45 },
-	agents: { icon: "\uf1ae", code: 141 },
-} as const;
-
-const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const color = (code: number, text: string) => `\x1b[38;5;${code}m${text}\x1b[0m`;
-const SPIN_MS = 120;
-
-/**
- * Same recipe as pi-webtasks: nerd-font icon, 256-colour, the count of running
- * jobs, a braille spinner frame while any run. State changes the glyph and
- * colour in place, never the width: dim when idle, the lane colour while
- * running, and a red warning glyph while a failure nobody has looked at is
- * waiting. The footer is the user's whole signal; there are no transcript cards.
- */
-export function label(c: Counts, icon: string, code: number, frame = 0): string {
-	const glyph = c.failedUnread ? "\uf071" : icon;
-	const text = `${glyph} ${c.running}${c.running ? FRAMES[frame % FRAMES.length] : ""}`;
-	return color(c.failedUnread ? 203 : c.running ? code : 240, text);
-}
-
-/** The one status line: shell lane, then agent lane. */
-export function compose(counts: { bg: Counts; agents: Counts }, frame = 0): string {
-	return [label(counts.bg, LANES.bg.icon, LANES.bg.code, frame), label(counts.agents, LANES.agents.icon, LANES.agents.code, frame)].join("  ");
-}
-
-/**
- * Footer: one single-line value under one key, always present while the
- * session is open, set only on change. A spinner timer runs only while
- * something is running. Two channels, always both:
- *  - `ctx.ui.setStatus("bg")`: the contract every footer extension (Pi's own,
- *    zentui, powerline, statusline, starship styles) reads and places by key.
- *  - zentui custom-value protocol v1 under `pi-background:bg`: ignored unless a
- *    starship template aliases it. A user who aliases it turns the `bg` status
- *    key Off in /zentui extensions, so it is not shown twice.
- */
-export function publish(): void {
-	const ctx = host.ctx;
-	try {
-		if (!ctx?.hasUI || host.closed) return;
-		const counts = host.counts();
-		spin(counts.bg.running + counts.agents.running > 0);
-		const text = compose(counts, host.frame);
-		if (host.footer.get(ctx) === text) return;
-		host.footer.set(ctx, text);
-		ctx.ui.setStatus(FOOTER.status, text);
-		emit("zentui:variable", { key: FOOTER.variable, text });
-	} catch {
-		// Stale or closing UI: nothing to update.
-	}
-}
-
-/** Session end: remove both keys and stop the spinner. */
-export function clear(): void {
-	host.closed = true;
-	spin(false);
-	const ctx = host.ctx;
-	try {
-		if (!ctx?.hasUI) return;
-		ctx.ui.setStatus(FOOTER.status, undefined);
-		emit("zentui:variable", { key: FOOTER.variable, text: undefined });
-		host.footer.delete(ctx);
-	} catch {
-		// UI already gone.
-	}
-}
+export const port = piPort(host);
+export const footer = createFooter(port, () => host.counts(), host);
+/** A delivered or read result can clear an unread failure: repaint. */
+export const notifier = createNotifier(port, host, () => footer.publish());
+export const emit = port.emit;

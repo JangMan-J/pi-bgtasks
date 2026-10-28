@@ -1,4 +1,4 @@
-# pi-background
+# pi-bgtasks
 
 Background shell tasks and declared in-process subagents for Pi. Four tools, no commands, no settings.
 
@@ -64,16 +64,20 @@ Failures and kills throw in the foreground, so they arrive as tool errors. Outpu
 ## Behaviour
 
 - Foreground subagents return the result, or throw with the partial result on failure. Pi's abort stops them.
-- Background jobs wake a follow-up turn once on completion, unless started with `notifyOnCompletion: false` (both `bg_run` and `subagent`); then the result waits for `bg_logs`, and the footer does not flag it. If the agent is busy, the result is injected at the next turn boundary. Reading it with `bg_logs` first suppresses the wake. `bg_kill` never wakes.
+- Background jobs wake a follow-up turn once on completion, unless started with `notifyOnCompletion: false` (both `bg_run` and `subagent`); then the result waits for `bg_logs`, and a failure turns the footer red until it is read. If the agent is busy, the result is injected at the next turn boundary. Reading it with `bg_logs` first suppresses the wake. `bg_kill` never wakes.
 - Wake-ups are `display: false`: the model gets the report, the transcript shows no card. The footer carries the user-visible state.
 - Limits: 16 running shell tasks, 4 running subagents, 32 finished records kept per kind.
 - Shell tasks run in their own process group (`bash -lc`): SIGTERM, then SIGKILL after 1.5 s. Logs are `0600` in a per-user `0700` directory (`PI_BG_LOG_DIR` overrides). Running groups are SIGKILLed if pi exits without its shutdown hook.
 - Jobs survive `/reload`; callbacks reach the current extension instance. They are stopped on any other shutdown.
 - Output placed in a wake-up message is XML-escaped and bounded.
 
+## Subagent concurrency
+
+Up to four subagents run at once, counting session construction and teardown. Further requests are queued (`Queued subagent <id>`) and start in FIFO order as slots free; the queue holds at most 64, and a full queue rejects new requests. Foreground calls wait through the queue; background calls return an id at once and keep the usual completion wake-up. Reading queued work does not mark its future result read. `bg_kill` cancels queued work without starting it or waking a turn; shutdown cancels queued work before stopping running children. A session that fails to start is kept as a failed report and follows the normal wake-up rules. The footer counts running work, not queued work.
+
 ## Footer
 
-One status key, `bg`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
+One status key, `bgtasks`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
 
 Two lanes inside it, shell tasks then subagents. The number is how many are running; glyph and colour change in place to show the lane's state:
 
@@ -85,18 +89,7 @@ Two lanes inside it, shell tasks then subagents. The number is how many are runn
 
 The red clears once the failure is read with `bg_logs`, killed, or delivered to the model as a wake-up. Nothing is added to the transcript. zentui's colour mode `Original` keeps these colours, `Zentui` replaces them. Names and labels from tasks never reach the footer.
 
-### zentui templates
-
-The same text is also emitted through zentui's custom-value publisher protocol v1 under `pi-background:bg`, every time it changes. zentui ignores it unless a starship template aliases it. If you alias it, turn the `bg` status key Off in `/zentui extensions` so it is not shown twice.
-
-```json
-{
-  "components": { "footer": { "styles": { "starship": {
-    "variables": { "bg": "pi-background:bg" },
-    "compactFormat": "$cwd$wrap(on $git_branch)$wrap($bg)$wrap_sep$tokens"
-  } } } }
-}
-```
+`setStatus` is the only channel, as in pi-webtasks; nothing is published as a zentui custom variable, so it is never shown twice.
 
 ## Integration protocol
 
@@ -104,6 +97,17 @@ Unchanged from `pi-bg-tasks` v1, so existing readers (the simon-says bridge) kee
 `globalThis[Symbol.for("jang.pi.bg.tasks.v1")]` (`Map<id, task>`), `globalThis[Symbol.for("jang.pi.bg.service.v1")]` (`{version, store, list, get}`), and `pi.events` `bg-tasks:changed` / `bg-tasks:terminal`.
 
 Subagents add `globalThis[Symbol.for("jang.pi.bg.agents.v1")]` (`Map<id, run>`) and `bg-agents:changed` / `bg-agents:terminal`, payload `{version: 1, run}`.
+
+## Code map
+
+- `src/jobs.ts`: the job ledger. One lifecycle for both lanes: v1 stores and events, ids, settle, kill, read/unread, pruning, footer counts.
+- `src/shell.ts`, `src/agents.ts`: the two lanes. Each supplies how its work starts, stops, and is shown; `agents.ts` also owns declarations and model choice.
+- `src/scheduler.ts`: FIFO run scheduler under a concurrency limit; the subagent queue.
+- `src/notifier.ts`: wake-up delivery. Idle: send now; busy: append to the next turn boundary; settled: send what is left; a read withdraws.
+- `src/footer.ts`: the footer line and its spinner.
+- `src/port.ts`: the seam to Pi that the notifier and the footer use; the real adapter. Tests use a recording fake with a manual clock.
+- `src/host.ts`: the one record on globalThis that outlives `/reload` (bound session, pending wake-ups, footer state), and the notifier and footer built over it.
+- `src/index.ts`: hooks and tool definitions.
 
 ## Known limits
 
