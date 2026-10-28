@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # @types/node follows the engines floor in package.json, not the newest Node.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      pi:
+        patterns: ["@earendil-works/*", "typebox"]
+      dev:
+        dependency-type: development
+        exclude-patterns: ["@earendil-works/*", "typebox"]

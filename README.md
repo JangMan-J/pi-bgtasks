@@ -1,4 +1,4 @@
-# pi-bgtasks
+# @jangmanj/pi-bgtasks
 
 Background shell tasks and declared in-process subagents for Pi. Four tools, no commands, no settings.
 
@@ -12,6 +12,14 @@ Background shell tasks and declared in-process subagents for Pi. Four tools, no 
 The tool descriptions carry those instructions, so they travel with the tools into any session. Three short `promptGuidelines` add what a general `AGENTS.md` usually does not: start side work before blocking work, write a complete brief, never poll.
 
 Do not load it with `pi-bg-tasks` or `@gotgenes/pi-subagents`; the tool names clash.
+
+## Install
+
+```sh
+pi install npm:@jangmanj/pi-bgtasks
+```
+
+Needs Pi 1.4.0 or later and Node 22.19 or later.
 
 ## Declaring a subagent
 
@@ -108,6 +116,15 @@ Subagents add `globalThis[Symbol.for("jang.pi.bg.agents.v1")]` (`Map<id, run>`) 
 - `src/port.ts`: the seam to Pi that the notifier and the footer use; the real adapter. Tests use a recording fake with a manual clock.
 - `src/host.ts`: the one record on globalThis that outlives `/reload` (bound session, pending wake-ups, footer state), and the notifier and footer built over it.
 - `src/index.ts`: hooks and tool definitions.
+
+## Development
+
+```sh
+npm run check        # type checker and tests
+npm run smoke:pack   # pack, install the tarball, and load it in Pi
+```
+
+A release is `npm version patch` (or `minor`, `major`) and `git push --follow-tags`; CI publishes through npm trusted publishing with provenance.
 
 ## Known limits
 
