@@ -344,8 +344,15 @@ export function report(r: AgentRun | AgentSnapshot, max = MAX_RESULT): string {
 	];
 	if (r.note) lines.push(r.note);
 	if (r.status === "queued") lines.push("", "Queued; waiting for a running slot.");
-	else if (r.status === "running") lines.push("", "Still running; no result yet.");
-	else {
+	else if (r.status === "running") {
+		const progress = r.result.slice(0, max);
+		if (progress.trim()) {
+			lines.push("", `Latest progress (not the final report):\n${progress}`);
+			if (r.resultChars > progress.length) {
+				lines.push("", `[truncated: showing ${progress.length} of ${r.resultChars} characters${max < MAX_RESULT ? "; read the rest with bg_logs" : ""}]`);
+			}
+		} else lines.push("", "Still running; no assistant progress yet.");
+	} else {
 		const answer = r.result.slice(0, max);
 		if (r.status === "completed" && !answer.trim()) {
 			lines.push("", "NO RESULT: the subagent finished without writing a final answer. Do not assume the work was done; re-run with a prompt that asks for an explicit written report.");
@@ -380,7 +387,11 @@ async function drive(r: AgentRun, session: ChildSession, d: Declaration, prompt:
 			failure = e.message.stopReason === "error" ? e.message.errorMessage || "provider error" : undefined;
 			const c = e.message.content;
 			const t = (typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === "text" ? b.text ?? "" : "")).join("") : "").trim();
-			if (t) lastText = t; // the last message that said anything, not merely the last message
+			if (t) {
+				lastText = t; // the last message that said anything, not merely the last message
+				r.resultChars = t.length;
+				r.result = t.slice(0, MAX_RESULT); // live bg_logs reads show this as non-final progress
+			}
 		} else if (e?.type === "tool_execution_start") {
 			r.toolCalls++;
 		} else if (e?.type === "turn_end" && ++r.turns >= d.maxTurns && !limited) {

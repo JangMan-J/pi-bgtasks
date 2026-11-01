@@ -63,6 +63,7 @@ Every outcome, foreground or in the wake-up, is one report: a header (id, agent,
 
 | State | Body |
 | --- | --- |
+| `RUNNING` | The latest assistant message that contained text, labelled `Latest progress (not the final report)`. Before the first such message, the report says that no assistant progress is available yet. |
 | `COMPLETED` | The child's last message that contained text. Empty answers are never returned silently: `NO RESULT: the subagent finished without writing a final answer…` |
 | `FAILED` | `FAILED: <reason>` (provider error, `max_turns` reached, start failure), then any partial output, labelled as partial. |
 | `KILLED` | `KILLED before finishing.` plus partial output. |

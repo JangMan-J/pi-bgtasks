@@ -657,6 +657,24 @@ describe("subagents", () => {
 		assert.equal(pi.sent.length, 1);
 		assert.match(pi.sent[0].m.content, /<subagent-notification>/);
 	});
+	it("bg_logs shows a running subagent's latest progress before completion", async () => {
+		const pi = mockPi();
+		backgroundExtension(pi as any);
+		const ctx = mockCtx(tmp(), { idle: true });
+		await pi.fire("session_start", {}, ctx);
+		let release!: () => void;
+		const s = fakeSession(async (emit) => {
+			emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Mapped the entry points; checking callers next." }] } });
+			await new Promise<void>((resolve) => (release = resolve));
+		});
+		use(s);
+		const r = await agents.spawn(ctx, decl, { prompt: "go", background: true });
+		const res = await pi.tools.get("bg_logs").execute("progress", { taskId: r.id, tailLines: 20 }, undefined, undefined, ctx);
+		release();
+		await r.done;
+		assert.match(res.content[0].text, /Latest progress \(not the final report\)/);
+		assert.match(res.content[0].text, /Mapped the entry points; checking callers next\./);
+	});
 	it("background with notifyOnCompletion: false never wakes; the report waits in bg_logs", async () => {
 		const pi = mockPi();
 		backgroundExtension(pi as any);
