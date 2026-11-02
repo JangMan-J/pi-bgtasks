@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -56,6 +56,8 @@ const until = async (f: () => boolean, ms = 5000) => {
 afterEach(async () => {
 	await jobs.killAll();
 	notifier.drop();
+	agents.saved.clear();
+	host.sessionId = undefined;
 	agents.setFactory(undefined);
 });
 
@@ -205,7 +207,7 @@ describe("footer module", () => {
 	it("opens as dim zeros through setStatus alone, and writes only on change", () => {
 		const { f, footer } = make();
 		footer.open();
-		assert.equal(strip(f.status.get("bgtasks")), "\uf489 0  \uf1ae 0");
+		assert.equal(strip(f.status.get("bg-tasks")), "\uf489 0  \uf1ae 0");
 		assert.deepEqual(f.events, [], "no second channel");
 		const writes = f.writes;
 		footer.publish();
@@ -218,26 +220,26 @@ describe("footer module", () => {
 		counts.agents.running = 1;
 		footer.publish();
 		assert.equal(f.timers.size, 1);
-		assert.match(f.status.get("bgtasks")!, /\uf1ae 1⠋/);
+		assert.match(f.status.get("bg-tasks")!, /\uf1ae 1⠋/);
 		f.tick();
-		assert.match(f.status.get("bgtasks")!, /\uf1ae 1⠙/);
+		assert.match(f.status.get("bg-tasks")!, /\uf1ae 1⠙/);
 		counts.agents.running = 0;
 		f.tick();
 		assert.equal(f.timers.size, 0);
-		assert.equal(strip(f.status.get("bgtasks")), "\uf489 0  \uf1ae 0");
+		assert.equal(strip(f.status.get("bg-tasks")), "\uf489 0  \uf1ae 0");
 	});
 	it("close removes the footer and stops the spinner; nothing repaints until open", () => {
 		const { f, counts, footer } = make();
 		counts.bg.running = 1;
 		footer.open();
 		footer.close();
-		assert.equal(f.status.has("bgtasks"), true);
-		assert.equal(f.status.get("bgtasks"), undefined);
+		assert.equal(f.status.has("bg-tasks"), true);
+		assert.equal(f.status.get("bg-tasks"), undefined);
 		assert.equal(f.timers.size, 0);
 		footer.publish();
-		assert.equal(f.status.get("bgtasks"), undefined);
+		assert.equal(f.status.get("bg-tasks"), undefined);
 		footer.open();
-		assert.match(f.status.get("bgtasks")!, /\uf489 1/);
+		assert.match(f.status.get("bg-tasks")!, /\uf489 1/);
 	});
 	it("open repaints even when the text has not changed (a /reload keeps the same UI)", () => {
 		const { f, footer } = make();
@@ -491,44 +493,30 @@ describe("run scheduler", () => {
 });
 
 describe("declarations", () => {
-	const ok = "---\ndescription: Reads code\ntools: read, grep\nmodel: p/m\n---\nYou read.";
-	it("parses a complete declaration", () => {
-		const d = agents.parseDeclaration("reader", ok) as agents.Declaration;
+	const ok: agents.AgentSpecInput = { agent: "reader", description: "Reads code", tools: ["read", "grep"], model: "p/m", systemPrompt: "You read." };
+	it("builds a complete runtime declaration", () => {
+		const d = agents.buildDeclaration(ok) as agents.Declaration;
 		assert.deepEqual(d.tools, ["read", "grep"]);
 		assert.equal(d.maxTurns, agents.DEFAULT_MAX_TURNS);
 		assert.equal(d.systemPrompt, "You read.");
 	});
-	for (const [why, text, name] of [
-		["missing model", ok.replace("model: p/m\n", ""), "a"],
-		["missing tools", ok.replace("tools: read, grep\n", ""), "a"],
-		["empty prompt", ok.replace("You read.", ""), "a"],
-		["unknown key", ok.replace("---\nYou", "extra: 1\n---\nYou"), "a"],
-		["bad model", ok.replace("p/m", "two words"), "a"],
-		["bad thinking", ok.replace("model:", "thinking: loud\nmodel:"), "a"],
-		["own tool", ok.replace("read, grep", "read, bg_run"), "a"],
-		["bad name", ok, "bad name"],
-		["no frontmatter", "hello", "a"],
+	for (const [why, patch] of [
+		["missing model", { model: "" }],
+		["inherited model", { model: "inherit" }],
+		["empty prompt", { systemPrompt: "   " }],
+		["bad model", { model: "two words" }],
+		["bad thinking", { thinking: "loud" }],
+		["bad maxTurns", { maxTurns: 0 }],
+		["own tool", { tools: ["read", "bg_run"] }],
+		["bad tool name", { tools: ["read", "bad tool"] }],
+		["bad name", { agent: "bad name" }],
 	] as const) {
-		it(`rejects ${why}`, () => assert.equal(typeof agents.parseDeclaration(name, text), "string"));
+		it(`rejects ${why}`, () => assert.equal(typeof agents.buildDeclaration({ ...ok, ...patch }), "string"));
 	}
-	it("accepts tools: none and list syntax", () => {
-		assert.deepEqual((agents.parseDeclaration("a", ok.replace("read, grep", "none")) as any).tools, []);
-		assert.deepEqual((agents.parseDeclaration("a", ok.replace("read, grep", "[read, mcp__x__*]")) as any).tools, ["read", "mcp__x__*"]);
-	});
-	it("project overrides global; a broken override does not fall back", () => {
-		const cwd = tmp();
-		const g = tmp();
-		process.env.PI_CODING_AGENT_DIR = g;
-		mkdirSync(join(g, "agents"));
-		mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
-		writeFileSync(join(g, "agents", "a.md"), ok);
-		writeFileSync(join(g, "agents", "b.md"), ok);
-		writeFileSync(join(cwd, ".pi", "agents", "a.md"), ok.replace("Reads code", "Project"));
-		writeFileSync(join(cwd, ".pi", "agents", "b.md"), "broken");
-		const { agents: found, errors } = agents.loadDeclarations(cwd);
-		assert.equal(found.get("a")?.description, "Project");
-		assert.equal(found.has("b"), false);
-		assert.equal(errors.length, 1);
+	it("accepts empty/none tools and array or string syntax", () => {
+		assert.deepEqual((agents.buildDeclaration({ ...ok, tools: [] }) as any).tools, []);
+		assert.deepEqual((agents.buildDeclaration({ ...ok, tools: "none" }) as any).tools, []);
+		assert.deepEqual((agents.buildDeclaration({ ...ok, tools: ["read", "mcp__x__*"] }) as any).tools, ["read", "mcp__x__*"]);
 	});
 });
 
@@ -1015,13 +1003,13 @@ describe("results the caller can trust", () => {
 	});
 });
 
-describe("auto-created default agents", () => {
+describe("runtime and ephemeral session subagents", () => {
 	function setup() {
 		const dir = tmp();
 		process.env.PI_CODING_AGENT_DIR = dir;
 		const pi = mockPi();
 		backgroundExtension(pi as any);
-		const created: any[] = [];
+		const created: agents.Declaration[] = [];
 		const s = {
 			subscribe: () => () => {},
 			prompt: async () => {},
@@ -1035,45 +1023,94 @@ describe("auto-created default agents", () => {
 	}
 	const call = (pi: any, ctx: any, p: object) => pi.tools.get("subagent").execute("1", { prompt: "go", ...p }, undefined, undefined, ctx);
 
-	it("creates a read-only default, saves it, and says so", async () => {
+	it("declares general instructions and runtime parameters without referencing .md files", async () => {
+		const { pi, ctx } = setup();
+		await pi.fire("session_start", {}, ctx);
+		const tool = pi.tools.get("subagent");
+		assert.match(tool.description, /Specify the subagent at runtime/);
+		assert.doesNotMatch(tool.description, /agents\/.*\.md/);
+		assert.doesNotMatch(tool.description, /Declared agents:/);
+		assert.deepEqual(Object.keys(tool.parameters.properties), [
+			"agent",
+			"prompt",
+			"description",
+			"model",
+			"tools",
+			"systemPrompt",
+			"thinking",
+			"maxTurns",
+			"save",
+			"background",
+			"notifyOnCompletion",
+		]);
+	});
+	it("saves ephemerally per session by default, reuses by name, and clears on shutdown (not reload)", async () => {
 		const { dir, pi, created, ctx } = setup();
-		const res = await call(pi, ctx, { agent: "scout", model: "p/m" });
-		assert.deepEqual(created[0].tools, agents.SAFE_TOOLS);
+		await pi.fire("session_start", {}, ctx);
+		await call(pi, ctx, { agent: "scout", model: "p/m", tools: ["read", "grep"] });
+		assert.equal(agents.saved.has("scout"), true);
+		assert.equal(existsSync(join(dir, "agents")), false);
+
+		// Reused by name alone
+		await call(pi, ctx, { agent: "scout" });
+		assert.deepEqual(created[1].tools, ["read", "grep"]);
+
+		// Survives /reload
+		await pi.fire("session_shutdown", { reason: "reload" }, ctx);
+		assert.equal(agents.saved.has("scout"), true);
+
+		// Cleared on real session shutdown
+		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
+		assert.equal(agents.saved.has("scout"), false);
+		await assert.rejects(call(pi, ctx, { agent: "scout" }), /not saved in this session/);
+	});
+	it("runs a one-off runtime subagent without saving to session when save: false", async () => {
+		const { dir, pi, created, ctx } = setup();
+		await call(pi, ctx, { agent: "scout", model: "p/m", tools: ["read"], thinking: "high", maxTurns: 10, systemPrompt: "Custom prompt", save: false });
+		assert.deepEqual(created[0].tools, ["read"]);
 		assert.equal(created[0].model, "p/m");
-		const file = join(dir, "agents", "scout.md");
-		assert.ok(existsSync(file));
-		assert.match(res.content[0].text, /was not declared[\s\S]*created at .*scout\.md/);
-		// now a normal declaration: reused, not overwritten, no second note
-		writeFileSync(file, readFileSync(file, "utf8").replace("Auto-created", "Edited"));
-		const again = await call(pi, ctx, { agent: "scout" });
-		assert.doesNotMatch(again.content[0].text, /was not declared/);
-		assert.match(readFileSync(file, "utf8"), /Edited/);
+		assert.equal(created[0].thinking, "high");
+		assert.equal(created[0].maxTurns, 10);
+		assert.equal(created[0].systemPrompt, "Custom prompt");
+		assert.equal(agents.saved.has("scout"), false);
+		assert.equal(existsSync(join(dir, "agents")), false);
+		await assert.rejects(call(pi, ctx, { agent: "scout" }), /not saved in this session/);
 	});
-	it("requires a model to create an agent and never inherits one", async () => {
+	it("clears saved session agents when session_start switches to a new session id", async () => {
+		const { pi, ctx } = setup();
+		ctx.sessionManager = { getSessionId: () => "session-1" };
+		await pi.fire("session_start", {}, ctx);
+		await call(pi, ctx, { agent: "scout", model: "p/m", save: true });
+		assert.equal(agents.saved.has("scout"), true);
+
+		// Same session id (e.g. reload) keeps saved agents
+		await pi.fire("session_start", {}, ctx);
+		assert.equal(agents.saved.has("scout"), true);
+
+		// Different session id clears saved agents
+		ctx.sessionManager = { getSessionId: () => "session-2" };
+		await pi.fire("session_start", {}, ctx);
+		assert.equal(agents.saved.has("scout"), false);
+	});
+	it("requires a model when agent is not saved in the session and never inherits one", async () => {
 		const { dir, pi, ctx } = setup();
-		await assert.rejects(call(pi, ctx, { agent: "scout" }), /pass model \(provider\/id or model id\)\. Available: p\/m/);
-		await assert.rejects(call(pi, ctx, { agent: "scout", model: "inherit" }), /Cannot create agent/);
+		await assert.rejects(call(pi, ctx, { agent: "scout" }), /Pass model \(provider\/id or model id\)\. Available: p\/m/);
+		await assert.rejects(call(pi, ctx, { agent: "scout", model: "inherit" }), /Cannot configure agent/);
 		assert.equal(existsSync(join(dir, "agents")), false);
 	});
-	it("does not save a default whose model is unusable", async () => {
-		const { dir, pi, ctx } = setup();
-		await assert.rejects(call(pi, ctx, { agent: "ghost", model: "x/y" }), /does not exist/);
-		assert.equal(existsSync(join(dir, "agents", "ghost.md")), false);
+	it("does not save an agent whose model is unusable", async () => {
+		const { pi, ctx } = setup();
+		await assert.rejects(call(pi, ctx, { agent: "ghost", model: "x/y", save: true }), /does not exist/);
+		assert.equal(agents.saved.has("ghost"), false);
 	});
-	it("rejects bad names and models without writing", async () => {
-		const { dir, pi, ctx } = setup();
-		await assert.rejects(call(pi, ctx, { agent: "../evil", model: "p/m" }), /Cannot create agent/);
-		await assert.rejects(call(pi, ctx, { agent: "ok", model: "not a model" }), /Cannot create agent/);
-		assert.equal(existsSync(join(dir, "agents")), false);
-	});
-	it("refuses to replace an invalid declaration, and a model override on a declared agent", async () => {
-		const { dir, pi, ctx } = setup();
-		mkdirSync(join(dir, "agents"));
-		writeFileSync(join(dir, "agents", "broken.md"), "nope");
-		await assert.rejects(call(pi, ctx, { agent: "broken" }), /invalid declaration/);
-		assert.equal(readFileSync(join(dir, "agents", "broken.md"), "utf8"), "nope");
-		await call(pi, ctx, { agent: "fine", model: "p/m" });
-		await assert.rejects(call(pi, ctx, { agent: "fine", model: "a/b" }), /only applies to a new agent/);
+	it("rejects bad names, models, tools, thinking, and maxTurns without saving", async () => {
+		const { pi, ctx } = setup();
+		await assert.rejects(call(pi, ctx, { agent: "../evil", model: "p/m", save: true }), /Cannot configure agent/);
+		await assert.rejects(call(pi, ctx, { agent: "ok", model: "not a model", save: true }), /Cannot configure agent/);
+		await assert.rejects(call(pi, ctx, { agent: "ok", model: "p/m", tools: ["bg_run"], save: true }), /not available to subagents/);
+		await assert.rejects(call(pi, ctx, { agent: "ok", model: "p/m", thinking: "invalid", save: true }), /thinking must be one of/);
+		await assert.rejects(call(pi, ctx, { agent: "ok", model: "p/m", maxTurns: 999, save: true }), /maxTurns must be an integer 1-500/);
+		assert.equal(agents.saved.size, 0);
 	});
 });
 
@@ -1130,15 +1167,15 @@ describe("footer", () => {
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
-		assert.equal(strip(ctx.status.bgtasks), "\uf489 0  \uf1ae 0", "one key carries both lanes");
+		assert.equal(strip(ctx.status["bg-tasks"]), "\uf489 0  \uf1ae 0", "one key carries both lanes");
 		assert.equal(ctx.status["bg-agents"], undefined, "no second key to place");
 		const t = shell.start(ctx, { command: "sleep 30", name: "a\x1b[31m\nb", notifyOnCompletion: false });
-		assert.match(ctx.status.bgtasks!, /\uf489 1⠋/);
+		assert.match(ctx.status["bg-tasks"]!, /\uf489 1⠋/);
 		await jobs.kill(t);
-		await until(() => strip(ctx.status.bgtasks) === "\uf489 0  \uf1ae 0");
+		await until(() => strip(ctx.status["bg-tasks"]) === "\uf489 0  \uf1ae 0");
 		assert.ok(!/[\x00-\x1f]/.test(t.name));
 		await pi.fire("session_shutdown", { reason: "exit" }, ctx);
-		assert.equal(ctx.status.bgtasks, undefined);
+		assert.equal(ctx.status["bg-tasks"], undefined);
 	});
 	it("counts running jobs only; colour carries the state; an unread failure turns the lane red until read", async () => {
 		const strip = (t?: string) => t?.replace(/\x1b\[[0-9;]*m/g, "");
@@ -1155,10 +1192,10 @@ describe("footer", () => {
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "exit 3", notifyOnCompletion: false });
 		await until(() => t.status === "failed");
-		assert.match(ctx.status.bgtasks!, /38;5;203m\uf071 0/);
+		assert.match(ctx.status["bg-tasks"]!, /38;5;203m\uf071 0/);
 		assert.deepEqual(jobs.count(shell.tasks.values()), { running: 0, failedUnread: 1 });
 		await pi.tools.get("bg_logs").execute("c", { taskId: t.id }, undefined, undefined, ctx);
-		assert.match(ctx.status.bgtasks!, /38;5;240m\uf489 0/);
+		assert.match(ctx.status["bg-tasks"]!, /38;5;240m\uf489 0/);
 	});
 	it("a failure delivered as a wake-up clears the red, idle or at a turn boundary", async () => {
 		for (const idle of [true, false]) {
@@ -1169,11 +1206,11 @@ describe("footer", () => {
 			const t = shell.start(ctx, { command: "exit 3" });
 			await until(() => t.completedAt !== null);
 			if (!idle) {
-				assert.match(ctx.status.bgtasks!, /38;5;203m/, "red while the failure waits");
+				assert.match(ctx.status["bg-tasks"]!, /38;5;203m/, "red while the failure waits");
 				await pi.fire("turn_end", { entries: [] }, ctx);
 			}
 			assert.ok(t.notificationDeliveredAt, `delivered (idle: ${idle})`);
-			assert.doesNotMatch(ctx.status.bgtasks!, /38;5;203m/, `not red once delivered (idle: ${idle})`);
+			assert.doesNotMatch(ctx.status["bg-tasks"]!, /38;5;203m/, `not red once delivered (idle: ${idle})`);
 			await pi.fire("session_shutdown", { reason: "exit" }, ctx);
 		}
 	});
@@ -1207,16 +1244,12 @@ describe("footer", () => {
 		const ctx = mockCtx(tmp(), { ui: true });
 		await pi.fire("session_start", {}, ctx);
 		const t = shell.start(ctx, { command: "sleep 30", notifyOnCompletion: false });
-		assert.match(ctx.status.bgtasks!, /\uf489 1⠋/);
+		assert.match(ctx.status["bg-tasks"]!, /\uf489 1⠋/);
 		await jobs.kill(t);
-		await until(() => /38;5;240m/.test(ctx.status.bgtasks ?? ""));
+		await until(() => /38;5;240m/.test(ctx.status["bg-tasks"] ?? ""));
 		assert.ok(!seen.includes("zentui:variable"));
 	});
 	it("a foreground failure the model already received does not leave the footer red", async () => {
-		const dir = tmp();
-		process.env.PI_CODING_AGENT_DIR = dir;
-		mkdirSync(join(dir, "agents"));
-		writeFileSync(join(dir, "agents", "r.md"), "---\ndescription: d\ntools: read\nmodel: p/m\n---\nYou read.");
 		const pi = mockPi();
 		backgroundExtension(pi as any);
 		const ctx = mockCtx(tmp(), { ui: true });
@@ -1231,8 +1264,8 @@ describe("footer", () => {
 				bindExtensions: async () => {},
 			}),
 		});
-		await assert.rejects(pi.tools.get("subagent").execute("1", { agent: "r", prompt: "go" }, undefined, undefined, ctx), /FAILED: boom/);
-		assert.doesNotMatch(ctx.status.bgtasks!, /38;5;203m/);
+		await assert.rejects(pi.tools.get("subagent").execute("1", { agent: "r", model: "p/m", prompt: "go" }, undefined, undefined, ctx), /FAILED: boom/);
+		assert.doesNotMatch(ctx.status["bg-tasks"]!, /38;5;203m/);
 	});
 	it("oneLine strips control characters", () => assert.equal(oneLine("a\x1b]0;x\x07\nb"), "a ]0;x b"));
 });

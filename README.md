@@ -1,11 +1,11 @@
 # @jangmanj/pi-bgtasks
 
-Background shell tasks and declared in-process subagents for Pi. Four tools, no commands, no settings.
+Background shell tasks and runtime in-process subagents for Pi. Four tools, no commands, no settings.
 
 | Tool | Does | The model is told |
 | --- | --- | --- |
 | `bg_run` | Start a shell command in the background. Returns an id and a log path. | Start long commands before blocking work; completion wakes you, so never sleep or poll; report done only once every task has exited and been checked. |
-| `subagent` | Run a **declared** agent, foreground or `background: true`. | Hand off self-contained adjacent work (mapping, long reads, research, review, independent slices), several at once before blocking work; the prompt is the whole brief; a report is evidence, not completion. |
+| `subagent` | Run a runtime-specified subagent (optionally saved ephemerally per session), foreground or `background: true`. | Hand off self-contained adjacent work (mapping, long reads, research, review, independent slices), several at once before blocking work; the prompt is the whole brief; a report is evidence, not completion. |
 | `bg_logs` | List tasks and subagents, or read one by id (shell tail or subagent report). | For reading more than a wake-up preview, or fresh state for a decision; not a way to wait. |
 | `bg_kill` | Stop one by id. | For work no longer needed or run away; never wakes a turn. |
 
@@ -21,37 +21,22 @@ pi install npm:@jangmanj/pi-bgtasks
 
 Needs Pi 1.4.0 or later and Node 22.19 or later.
 
-## Declaring a subagent
+## Specifying a subagent at runtime
 
-A subagent exists only if a file declares all of it. Files: `<cwd>/.pi/agents/<name>.md` over `$PI_CODING_AGENT_DIR/agents/<name>.md` (default `~/.pi/agent/agents/`). The project file wins by name. Edits apply on the next spawn.
+Subagents are specified at runtime through `subagent` parameters—never read from or written to disk. By default (`save: true`), the configuration is saved ephemerally in memory for the current session so subsequent calls in the session can invoke `agent` by name alone; pass `save: false` for a one-off run.
 
-```markdown
----
-description: Reads code and reports findings
-tools: read, grep, find, ls
-model: provider/model-id
-thinking: high
-max_turns: 20
----
-You read code and report what you find. Do not edit files.
-```
-
-| Key | Required | Rule |
+| Parameter | Required | Rule |
 | --- | --- | --- |
-| `description` | yes | One line, shown to the parent model. |
-| `tools` | yes | Exact allowlist: names or `*` patterns, comma list or `[a, b]`. `none` means no tools. |
-| `model` | yes | `provider/id` (exact), or a bare model id, resolved as below. Never inherited; `inherit` is invalid. |
+| `agent` | yes | Name matching `[A-Za-z][\w-]{0,31}`. Reuses a session-saved agent or names a runtime one. |
+| `prompt` | yes | The complete task brief for this run. |
+| `model` | unless saved | `provider/id` (exact), or a bare model id, resolved as below. Never inherited; `inherit` is invalid. |
+| `tools` | no | Exact allowlist: names or `*` patterns, default `["read", "grep", "find", "ls"]`. `[]` or `"none"` means no tools. |
+| `systemPrompt` | no | System prompt for the child session. Defaults to a read-only research prompt. |
 | `thinking` | no | `off minimal low medium high xhigh max`. |
-| `max_turns` | no | 1-500, default 30. Reaching it fails the run and keeps the partial result. |
-| body | yes | The whole system prompt. No parent prompt, context files, skills, or conversation is inherited. |
+| `maxTurns` | no | 1-500, default 30. Reaching it fails the run and keeps the partial result. |
+| `save` | no | Default `true`: saves the agent ephemerally for the current session (cleared on session exit/switch; survives `/reload`). `false` runs one-off. |
 
-### Undeclared names
-
-Calling `subagent` with a name that has no file creates a safe default instead of failing: tools `read, grep, find, ls` (read-only), `max_turns` 30, and a prompt that asks for batched work, observed and cited claims, and a final message ending in `done` or `partial` with the open items. It is saved to `~/.pi/agent/agents/<name>.md` so it becomes a normal declaration you can edit; an existing file is never overwritten. The `model` parameter is required for this and picks its model; without it the call fails and lists available models. The model is checked before anything is saved, and the result tells the caller what was created and where. `model` on an already-declared agent is rejected: a declaration's model is authoritative. A name whose file exists but is invalid is an error, not a trigger to create.
-
-Parsing is strict. An unknown key, a missing field, or a bad value makes that file invalid; it is not spawnable and the error is shown when the model asks for it. An invalid project file does not fall back to the global one it shadows.
-
-A child never receives this extension's tools (`subagent`, `bg_*`), even through a `*` pattern. A declaration that names them is invalid.
+A child never receives this extension's tools (`subagent`, `bg_*`), even through a `*` pattern. Naming them is rejected.
 
 ## Choosing a provider
 
@@ -86,7 +71,7 @@ Up to four subagents run at once, counting session construction and teardown. Fu
 
 ## Footer
 
-One status key, `bgtasks`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
+One status key, `bg-tasks`, through `ctx.ui.setStatus`, the channel every footer extension reads (Pi's own, zentui, powerline, statusline, starship styles). One key means one placement to choose. Same recipe as pi-webtasks: nerd-font icon, 256-colour, compact count, braille spinner while anything runs. Present from session start as dim zeros, so the footer keeps its shape when work begins; removed at session end. Set only on change. The spinner interval exists only while something is running.
 
 Two lanes inside it, shell tasks then subagents. The number is how many are running; glyph and colour change in place to show the lane's state:
 

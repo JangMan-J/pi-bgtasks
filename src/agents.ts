@@ -1,13 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as jobs from "./jobs.ts";
 import { duration, escapeXml, oneLine, stateLabel, type Status } from "./kit.ts";
 import { scheduler } from "./scheduler.ts";
 
 // ---------------------------------------------------------------------------
-// Declarations: a subagent exists only if a file declares it completely.
+// Runtime subagent specifications & ephemeral per-session registry.
 // ---------------------------------------------------------------------------
 
 /** This extension's own tools. A child never gets them: no recursion, no orphan jobs. */
@@ -17,7 +14,16 @@ export const DEFAULT_MAX_TURNS = 30;
 export const MAX_RUNNING = 4;
 const KILL_WAIT_MS = 5000;
 const MAX_RESULT = 32 * 1024;
-const KEYS = ["description", "tools", "model", "thinking", "max_turns"];
+
+/** Default tools of a runtime subagent: read-only. */
+export const SAFE_TOOLS = ["read", "grep", "find", "ls"];
+
+export const DEFAULT_SYSTEM_PROMPT = [
+	"You are a read-only research subagent. Investigate with your tools; you cannot edit files or run commands.",
+	"Batch your work: read files in large chunks and group related searches, so turns go to findings, not round trips.",
+	"Base every claim on what you observed, and cite file:line. Name what you could not confirm instead of guessing.",
+	"Your final message is the only thing the caller receives, so put the complete findings in it. End it with `done` when the whole brief is covered, or `partial` followed by each open item and what blocked it.",
+].join("\n");
 
 export interface Declaration {
 	name: string;
@@ -31,136 +37,96 @@ export interface Declaration {
 	systemPrompt: string;
 }
 
-const scalar = (v: string) => v.replace(/^(["'])(.*)\1$/, "$2").trim();
-
-/** Flat `key: value` frontmatter. Strict: anything else is an error. */
-function split(text: string): { fm: Map<string, string>; body: string } | string {
-	const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n([\s\S]*))?$/.exec(text);
-	if (!m) return "missing --- frontmatter";
-	const fm = new Map<string, string>();
-	for (const line of m[1].split(/\r?\n/)) {
-		if (!line.trim() || line.trimStart().startsWith("#")) continue;
-		const kv = /^([a-z_]+):[ \t]*(.*)$/.exec(line);
-		if (!kv) return `unparseable frontmatter line: ${oneLine(line)}`;
-		if (fm.has(kv[1])) return `duplicate key: ${kv[1]}`;
-		fm.set(kv[1], kv[2]);
-	}
-	return { fm, body: (m[2] ?? "").trim() };
+export interface AgentSpecInput {
+	agent?: string;
+	description?: string;
+	tools?: readonly string[] | string;
+	model?: string;
+	thinking?: string;
+	maxTurns?: number;
+	systemPrompt?: string;
+	save?: boolean;
 }
 
-export function parseDeclaration(name: string, text: string): Declaration | string {
-	if (!/^[A-Za-z][\w-]{0,31}$/.test(name)) return "name must match [A-Za-z][\\w-]{0,31}";
-	const parts = split(text);
-	if (typeof parts === "string") return parts;
-	const { fm, body } = parts;
-	for (const k of fm.keys()) if (!KEYS.includes(k)) return `unknown key: ${k}`;
-	for (const k of ["description", "tools", "model"]) if (!fm.has(k)) return `missing required key: ${k}`;
-	if (!body) return "empty system prompt (the body after the frontmatter)";
+export const SAVED_KEY = Symbol.for("jang.pi.bg.saved.v1");
+/** Ephemeral per-session subagent definitions; survives /reload, cleared on session shutdown/switch. */
+export const saved: Map<string, Declaration> = ((globalThis as any)[SAVED_KEY] ??= new Map());
 
-	const description = oneLine(scalar(fm.get("description")!), 200);
-	if (!description) return "empty description";
+const scalar = (v: string) => v.replace(/^(["'])(.*)\1$/, "$2").trim();
 
-	const raw = scalar(fm.get("tools")!).replace(/^\[(.*)\]$/, "$1").trim();
-	const tools = raw === "" || raw === "none" ? [] : raw.split(",").map((s) => scalar(s.trim()));
-	for (const t of tools) {
+function parseToolsInput(rawInput: readonly string[] | string): string[] | string {
+	const items = Array.isArray(rawInput)
+		? rawInput.map((s) => scalar(String(s).trim())).filter(Boolean)
+		: (() => {
+				const raw = scalar(String(rawInput)).replace(/^\[(.*)\]$/, "$1").trim();
+				return raw === "" || raw === "none" ? [] : raw.split(",").map((s) => scalar(s.trim())).filter(Boolean);
+			})();
+	if (items.length === 1 && items[0] === "none") return [];
+	for (const t of items) {
 		if (!/^[\w*:.-]+$/.test(t)) return `invalid tool name: ${oneLine(t)}`;
 		if (OWN_TOOLS.includes(t)) return `tool ${t} is not available to subagents`;
 	}
+	return [...new Set(items)];
+}
 
-	const model = scalar(fm.get("model")!);
+/** Validate and construct a runtime subagent declaration, merging over a prior session entry if present. */
+export function buildDeclaration(input: AgentSpecInput, prior?: Declaration): Declaration | string {
+	const name = String(input.agent ?? "").trim();
+	if (!/^[A-Za-z][\w-]{0,31}$/.test(name)) return "name must match [A-Za-z][\\w-]{0,31}";
+
+	const description = oneLine(input.description !== undefined ? scalar(String(input.description)) : prior?.description || "Runtime subagent", 200);
+	if (!description) return "empty description";
+
+	const tools = input.tools !== undefined ? parseToolsInput(input.tools) : prior ? [...prior.tools] : [...SAFE_TOOLS];
+	if (typeof tools === "string") return tools;
+
+	const model = input.model !== undefined ? scalar(String(input.model)) : prior?.model ?? "";
 	if (!/^\S+$/.test(model) || model.toLowerCase() === "inherit") {
 		return `model must name a model ("provider/id" or a model id); inheriting the parent's model is not supported: ${oneLine(model)}`;
 	}
 
-	let thinking: Declaration["thinking"];
-	if (fm.has("thinking")) {
-		const t = scalar(fm.get("thinking")!);
+	let thinking: Declaration["thinking"] = prior?.thinking;
+	if (input.thinking !== undefined) {
+		const t = scalar(String(input.thinking));
 		thinking = THINKING.find((x) => x === t);
 		if (!thinking) return `thinking must be one of ${THINKING.join(", ")}`;
 	}
 
-	let maxTurns = DEFAULT_MAX_TURNS;
-	if (fm.has("max_turns")) {
-		maxTurns = Number(scalar(fm.get("max_turns")!));
-		if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 500) return "max_turns must be an integer 1-500";
+	let maxTurns = prior?.maxTurns ?? DEFAULT_MAX_TURNS;
+	if (input.maxTurns !== undefined) {
+		maxTurns = Number(input.maxTurns);
+		if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 500) return "maxTurns must be an integer 1-500";
 	}
-	return { name, description, tools: [...new Set(tools)], model, thinking, maxTurns, systemPrompt: body };
-}
 
-function agentDirs(cwd: string): string[] {
-	const global = join(process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent"), "agents");
-	return [global, join(cwd, ".pi", "agents")]; // later wins
-}
+	const systemPrompt = input.systemPrompt !== undefined ? String(input.systemPrompt).trim() : prior?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+	if (!systemPrompt) return "empty systemPrompt";
 
-/** Read declarations from disk on every call so edits apply without a reload. */
-export function loadDeclarations(cwd: string): { agents: Map<string, Declaration>; errors: string[]; invalid: Set<string> } {
-	const agents = new Map<string, Declaration>();
-	const errors: string[] = [];
-	const invalid = new Set<string>();
-	for (const dir of agentDirs(cwd)) {
-		if (!existsSync(dir)) continue;
-		let files: string[] = [];
-		try {
-			files = readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
-		} catch (e) {
-			errors.push(`${dir}: ${e instanceof Error ? e.message : e}`);
-		}
-		for (const f of files) {
-			const name = basename(f, ".md");
-			try {
-				const d = parseDeclaration(name, readFileSync(join(dir, f), "utf8"));
-				if (typeof d === "string") {
-					agents.delete(name); // a broken override must not fall back to the file it shadows
-					invalid.add(name);
-					errors.push(`${join(dir, f)}: ${d}`);
-				} else agents.set(name, d);
-			} catch (e) {
-				invalid.add(name);
-				errors.push(`${join(dir, f)}: ${e instanceof Error ? e.message : e}`);
-			}
-		}
-	}
-	return { agents, errors, invalid };
+	return { name, description, tools, model, thinking, maxTurns, systemPrompt };
 }
-
-/** Tools of an auto-created agent: read-only. */
-export const SAFE_TOOLS = ["read", "grep", "find", "ls"];
 
 /**
- * An undeclared agent name gets a safe default: read-only tools and a prompt that
- * demands a written final answer. It is written to the global agents directory so
- * it becomes a real, editable declaration; an existing file is never overwritten.
+ * Resolve a subagent declaration from runtime parameters and the ephemeral session store.
+ * Validates the model before saving (ephemeral session save defaults to true; pass `save: false` for one-off).
  */
-export function defaultDeclaration(name: string, model: string): { decl: Declaration; text: string } {
-	const text = [
-		"---",
-		"description: Auto-created read-only default agent",
-		`tools: ${SAFE_TOOLS.join(", ")}`,
-		`model: ${model}`,
-		`max_turns: ${DEFAULT_MAX_TURNS}`,
-		"---",
-		"You are a read-only research subagent. Investigate with your tools; you cannot edit files or run commands.",
-		"Batch your work: read files in large chunks and group related searches, so turns go to findings, not round trips.",
-		"Base every claim on what you observed, and cite file:line. Name what you could not confirm instead of guessing.",
-		"Your final message is the only thing the caller receives, so put the complete findings in it. End it with `done` when the whole brief is covered, or `partial` followed by each open item and what blocked it.",
-		"",
-	].join("\n");
-	const decl = parseDeclaration(name, text);
-	if (typeof decl === "string") throw new Error(`Cannot create agent "${oneLine(name)}": ${decl}`);
-	return { decl, text };
-}
-
-/** Save a default as a real declaration. Never overwrites; null when it could not be saved. */
-export function saveDeclaration(cwd: string, name: string, text: string): string | null {
-	try {
-		const dir = agentDirs(cwd)[0];
-		mkdirSync(dir, { recursive: true });
-		const path = join(dir, `${name}.md`);
-		writeFileSync(path, text, { flag: "wx", mode: 0o644 });
-		return path;
-	} catch {
-		return null;
+export function resolveDeclaration(ctx: ExtensionContext, input: AgentSpecInput): { decl: Declaration; note?: string } {
+	const name = String(input.agent ?? "").trim();
+	const prior = saved.get(name);
+	if (!prior && !input.model?.trim()) {
+		if (!/^[A-Za-z][\w-]{0,31}$/.test(name)) {
+			throw new Error(`Cannot create agent "${oneLine(name)}": name must match [A-Za-z][\\w-]{0,31}`);
+		}
+		const some = ctx.modelRegistry.getAvailable().slice(0, 20).map((m) => `${m.provider}/${m.id}`).join(", ");
+		throw new Error(`Agent "${oneLine(name)}" is not saved in this session. Pass model (provider/id or model id). Available: ${some || "none"}.`);
 	}
+	const decl = buildDeclaration(input, prior);
+	if (typeof decl === "string") {
+		throw new Error(`Cannot configure agent "${oneLine(name)}": ${decl}`);
+	}
+	resolveModel(ctx, decl); // fail before saving anything
+	if (input.save !== false) {
+		saved.set(decl.name, decl);
+	}
+	return { decl };
 }
 
 // ---------------------------------------------------------------------------

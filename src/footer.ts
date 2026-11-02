@@ -40,7 +40,7 @@ export interface Footer {
 	close(): void;
 }
 
-const FOOTER = { status: "bgtasks" } as const;
+const FOOTER = { status: "bg-tasks" } as const;
 const LANES = {
 	bg: { icon: "\uf489", code: 45 },
 	agents: { icon: "\uf1ae", code: 141 },

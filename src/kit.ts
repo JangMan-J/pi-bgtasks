@@ -35,6 +35,7 @@ export const Type = {
 	String: (o?: Schema): Schema => ({ [KIND]: "String", type: "string", ...o }),
 	Number: (o?: Schema): Schema => ({ [KIND]: "Number", type: "number", ...o }),
 	Boolean: (o?: Schema): Schema => ({ [KIND]: "Boolean", type: "boolean", ...o }),
+	Array: (items: Schema, o?: Schema): Schema => ({ [KIND]: "Array", type: "array", items, ...o }),
 	Optional: (s: Schema): Schema => ({ ...s, [OPTIONAL]: "Optional" }),
 	Object: (props: Record<string, Schema>): any => {
 		const required = Object.keys(props).filter((k) => !(OPTIONAL in props[k]));

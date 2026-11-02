@@ -13,6 +13,7 @@ import { piPort } from "./port.ts";
 interface Host extends NotifierState, FooterState {
 	pi?: ExtensionAPI;
 	ctx?: ExtensionContext;
+	sessionId?: string;
 	/** Footer counts per lane; the extension entry installs the job ledger's. */
 	counts: () => LaneCounts;
 	/** Older builds kept the spinner's interval handle here. */

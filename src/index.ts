@@ -1,28 +1,22 @@
 /**
- * pi-bgtasks: background shell tasks (bg_run, bg_logs, bg_kill) and declared
+ * pi-bgtasks: background shell tasks (bg_run, bg_logs, bg_kill) and runtime
  * in-process subagents (subagent). One notifier, one footer contract.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as agents from "./agents.ts";
 import { footer, host, notifier } from "./host.ts";
 import * as jobs from "./jobs.ts";
-import { oneLine, Type } from "./kit.ts";
+import { Type } from "./kit.ts";
 import * as shell from "./shell.ts";
 
 const text = (t: string, details?: unknown) => ({ content: [{ type: "text" as const, text: t }], details });
 
-function subagentDescription(cwd: string): string {
-	const { agents: declared, errors } = agents.loadDeclarations(cwd);
-	const list = [...declared.values()].map((d) => `- ${d.name}: ${d.description}`).join("\n") || "(none declared)";
-	return [
-		"Hand one bounded, self-contained piece of work to a fresh agent with its own context window, tools and model. Only its final report comes back, so your context stays small. Use it for adjacent work that needs none of your conversation: mapping or searching a codebase, reading many files or long logs, research, a review or second opinion, and each independent slice of a multi-part request. Start these with background: true, several in one turn, before you begin blocking work of your own. Keep work that is trivial (one or two calls) or that depends on context only you hold.",
-		"The prompt is the whole brief: goal, paths, constraints, what counts as done, and the exact shape of the answer you want. The subagent sees nothing else: no conversation, no AGENTS.md, no attachments.",
-		"Every run returns one report: a header (id, agent, state, model, turns, tool calls, duration), then the answer or an explicit NO RESULT / FAILED / KILLED notice. While a subagent is running, bg_logs shows its latest assistant message as non-final progress. A report is evidence, not completion: check what matters before you report done. Foreground returns it directly; background returns an id and wakes a follow-up turn with it, and bg_logs lists reports not yet read.",
-		"Agents are declared in .pi/agents/<name>.md (project) or ~/.pi/agent/agents/<name>.md, each with its own prompt, tools and model. An undeclared name creates a read-only default (read, grep, find, ls) and saves it there; model is then required (provider/id, or a bare model id, which prefers a subscription provider). Models are never inherited.",
-		`Declared agents:\n${list}`,
-		...(errors.length ? [`${errors.length} invalid declaration(s) ignored.`] : []),
-	].join("\n");
-}
+const SUBAGENT_DESCRIPTION = [
+	"Hand one bounded, self-contained piece of work to a fresh agent with its own context window, tools and model. Only its final report comes back, so your context stays small. Use it for adjacent work that needs none of your conversation: mapping or searching a codebase, reading many files or long logs, research, a review or second opinion, and each independent slice of a multi-part request. Start these with background: true, several in one turn, before you begin blocking work of your own. Keep work that is trivial (one or two calls) or that depends on context only you hold.",
+	"The prompt is the whole brief: goal, paths, constraints, what counts as done, and the exact shape of the answer you want. The subagent sees nothing else: no conversation, no AGENTS.md, no attachments.",
+	"Every run returns one report: a header (id, agent, state, model, turns, tool calls, duration), then the answer or an explicit NO RESULT / FAILED / KILLED notice. While a subagent is running, bg_logs shows its latest assistant message as non-final progress. A report is evidence, not completion: check what matters before you report done. Foreground returns it directly; background returns an id and wakes a follow-up turn with it, and bg_logs lists reports not yet read.",
+	"Specify the subagent at runtime (model, plus optional tools, systemPrompt, thinking, maxTurns). Defaults are read-only tools (read, grep, find, ls) and maxTurns 30; model is required on first use (provider/id, or a bare model id, which prefers a subscription provider) and never inherited. By default (save: true), the agent configuration is saved ephemerally in memory for the current session so later calls can reuse it by agent name alone; pass save: false for a one-off run.",
+].join("\n");
 
 export default function backgroundExtension(pi: ExtensionAPI) {
 	// A subagent's session loads this extension too. It must not take over the
@@ -33,17 +27,22 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	const bind = (ctx: ExtensionContext) => void (host.ctx = ctx);
 
 	// ---- hooks -------------------------------------------------------------
-	let described = "";
 	pi.on("session_start", async (_e, ctx) => {
 		bind(ctx);
+		const sid = (ctx as any).sessionManager?.getSessionId?.();
+		if (host.sessionId !== undefined && sid !== undefined && host.sessionId !== sid) {
+			agents.saved.clear();
+		}
+		if (sid !== undefined) host.sessionId = sid;
 		footer.open();
-		registerSubagent(ctx.cwd);
 	});
 	pi.on("turn_end", async (e, ctx) => (bind(ctx), notifier.boundary(e as any) as any));
 	pi.on("agent_before_settle", async (e, ctx) => (bind(ctx), notifier.boundary(e as any) as any));
 	pi.on("agent_settled", async (e, ctx) => (bind(ctx), notifier.settle(e)));
 	pi.on("session_shutdown", async (e) => {
-		if (e.reason === "reload") return; // jobs survive a reload
+		if (e.reason === "reload") return; // jobs and saved session agents survive a reload
+		agents.saved.clear();
+		host.sessionId = undefined;
 		notifier.drop();
 		footer.close();
 		await jobs.killAll();
@@ -111,64 +110,43 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		},
 	} as any);
 
-	function registerSubagent(cwd: string) {
-		const description = subagentDescription(cwd);
-		if (description === described) return;
-		described = description;
-		pi.registerTool({
-			name: "subagent",
-			label: "Subagent",
-			description,
-			promptSnippet: "Hand self-contained adjacent work (mapping, search, long reads, research, review, independent slices) to a fresh-context subagent; background: true to run several at once.",
-			promptGuidelines: [
-				"Before blocking work, start what can run beside it: bg_run for long commands, subagent with background: true for adjacent self-contained work, one call per independent part, all in the same turn.",
-				"A subagent prompt is a complete brief: goal, paths, constraints, what counts as done, and the answer shape. It sees nothing of your conversation.",
-				"Never wait by polling; completion wakes you. Report done only after every task and subagent you started has finished and its result is checked.",
-			],
-			parameters: Type.Object({
-				agent: Type.String({ description: "A declared agent name, or a new name to create a read-only default." }),
-				prompt: Type.String({ description: "The complete brief: goal, paths, constraints, done-criteria, answer shape. The subagent sees nothing else." }),
-				description: Type.Optional(Type.String({ description: "Short label for status display." })),
-				model: Type.Optional(Type.String({ description: "provider/id, or a bare model id (prefers a subscription provider). Required when creating a new agent; rejected for a declared one." })),
-				background: Type.Optional(Type.Boolean({ description: "Return an id now and wake a follow-up turn with the report (default false: wait and return the report)." })),
-				notifyOnCompletion: Type.Optional(Type.Boolean({ description: "Background only. Wake on completion (default true); false to leave the report for bg_logs and the footer." })),
-			}),
-			async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
-				bind(ctx);
-				const { agents: declared, errors, invalid } = agents.loadDeclarations(ctx.cwd);
-				let d = declared.get(p.agent);
-				let note: string | undefined;
-				if (!d) {
-					if (invalid.has(p.agent)) {
-						throw new Error(`Agent "${p.agent}" has an invalid declaration; fix it:\n${errors.filter((e) => e.includes(`${p.agent}.md:`)).join("\n")}`);
-					}
-					if (!p.model?.trim()) {
-						const some = ctx.modelRegistry.getAvailable().slice(0, 20).map((m) => `${m.provider}/${m.id}`).join(", ");
-						throw new Error(`Agent "${oneLine(String(p.agent ?? ""))}" is not declared. To create it, pass model (provider/id or model id). Available: ${some || "none"}.`);
-					}
-					const made = agents.defaultDeclaration(String(p.agent ?? ""), p.model.trim());
-					d = made.decl;
-					agents.resolveModel(ctx, d); // fail before saving anything
-					const path = agents.saveDeclaration(ctx.cwd, d.name, made.text);
-					note = `Note: "${d.name}" was not declared, so a read-only default agent (${agents.SAFE_TOOLS.join(", ")}; model ${d.model}) was ${
-						path ? `created at ${path}. Edit it to customize.` : "used for this run only (could not save it)."
-					}`;
-				} else if (p.model) {
-					throw new Error(`Agent "${d.name}" is declared with model ${d.model}; the model parameter only applies to a new agent.`);
-				}
-				const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, notifyOnCompletion: p.notifyOnCompletion, signal, note });
-				if (r.background) {
-					return text(`${r.status === "queued" ? "Queued" : "Started"} subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).${note ? `\n${note}` : ""}\n${
-						r.notifyOnCompletion ? "Completion will wake a follow-up turn with its report; bg_logs shows unread results." : "Completion notification disabled; read the report with bg_logs."
-					}`, { id: r.id });
-				}
-				await r.done;
-				jobs.observe(r); // the report is the tool result
-				const out = agents.report(r);
-				if (r.status !== "completed") throw new Error(out);
-				return text(out, { id: r.id, turns: r.turns, toolCalls: r.toolCalls, model: r.model });
-			},
-		} as any);
-	}
-	registerSubagent(process.cwd());
+	pi.registerTool({
+		name: "subagent",
+		label: "Subagent",
+		description: SUBAGENT_DESCRIPTION,
+		promptSnippet: "Hand self-contained adjacent work (mapping, search, long reads, research, review, independent slices) to a fresh-context subagent; background: true to run several at once.",
+		promptGuidelines: [
+			"Before blocking work, start what can run beside it: bg_run for long commands, subagent with background: true for adjacent self-contained work, one call per independent part, all in the same turn.",
+			"A subagent prompt is a complete brief: goal, paths, constraints, what counts as done, and the answer shape. It sees nothing of your conversation.",
+			"Never wait by polling; completion wakes you. Report done only after every task and subagent you started has finished and its result is checked.",
+		],
+		parameters: Type.Object({
+			agent: Type.String({ description: "Subagent name (reuses a session-saved agent, or names a runtime one)." }),
+			prompt: Type.String({ description: "The complete brief: goal, paths, constraints, done-criteria, answer shape. The subagent sees nothing else." }),
+			description: Type.Optional(Type.String({ description: "Short label for status display." })),
+			model: Type.Optional(Type.String({ description: "provider/id, or a bare model id (prefers a subscription provider). Required unless agent is already saved in this session." })),
+			tools: Type.Optional(Type.Array(Type.String(), { description: "Allowed tools (names or * patterns; empty for none). Defaults to read, grep, find, ls." })),
+			systemPrompt: Type.Optional(Type.String({ description: "System prompt for the subagent. Defaults to a read-only research prompt." })),
+			thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh, max." })),
+			maxTurns: Type.Optional(Type.Number({ description: "Maximum turns (1-500, default 30)." })),
+			save: Type.Optional(Type.Boolean({ description: "Save this agent configuration ephemerally for the current session (default true; false for one-off)." })),
+			background: Type.Optional(Type.Boolean({ description: "Return an id now and wake a follow-up turn with the report (default false: wait and return the report)." })),
+			notifyOnCompletion: Type.Optional(Type.Boolean({ description: "Background only. Wake on completion (default true); false to leave the report for bg_logs and the footer." })),
+		}),
+		async execute(_id: string, p: any, signal: AbortSignal | undefined, _u: unknown, ctx: ExtensionContext) {
+			bind(ctx);
+			const { decl: d, note } = agents.resolveDeclaration(ctx, p);
+			const r = await agents.spawn(ctx, d, { prompt: p.prompt, description: p.description, background: p.background === true, notifyOnCompletion: p.notifyOnCompletion, signal, note });
+			if (r.background) {
+				return text(`${r.status === "queued" ? "Queued" : "Started"} subagent ${r.id} (${r.agent}: ${r.name}, ${r.model}).${note ? `\n${note}` : ""}\n${
+					r.notifyOnCompletion ? "Completion will wake a follow-up turn with its report; bg_logs shows unread results." : "Completion notification disabled; read the report with bg_logs."
+				}`, { id: r.id });
+			}
+			await r.done;
+			jobs.observe(r); // the report is the tool result
+			const out = agents.report(r);
+			if (r.status !== "completed") throw new Error(out);
+			return text(out, { id: r.id, turns: r.turns, toolCalls: r.toolCalls, model: r.model });
+		},
+	} as any);
 }
