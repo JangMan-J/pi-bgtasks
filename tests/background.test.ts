@@ -15,6 +15,8 @@ import { oneLine, readTail, type Job, type Status } from "../src/kit.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "pibg-"));
 process.env.PI_BG_LOG_DIR = join(tmp(), "logs");
+// Existing cases exercise the ungated extension; role cases set and restore it locally.
+delete process.env.JING_ROLE;
 
 function mockPi() {
 	const tools = new Map<string, any>();
@@ -22,6 +24,7 @@ function mockPi() {
 	const sent: any[] = [];
 	return {
 		tools,
+		hooks: on,
 		on: (e: string, h: any) => void on.set(e, h),
 		fire: (e: string, ev: any, ctx: any) => on.get(e)?.(ev, ctx),
 		sent,
@@ -602,6 +605,84 @@ describe("shell tasks", () => {
 		const svc = (globalThis as any)[shell.SERVICE_KEY];
 		assert.equal(svc.version, 1);
 		assert.equal(svc.store, shell.tasks);
+	});
+});
+
+describe("JING_ROLE gate", () => {
+	const preserveEnv = () => {
+		const saved = {
+			JING_ROLE: process.env.JING_ROLE,
+			JING_TOKEN: process.env.JING_TOKEN,
+			JING_NODE: process.env.JING_NODE,
+		};
+		return () => {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		};
+	};
+	const command = "printf '%s|%s' \"${JING_TOKEN-unset}\" \"$JING_NODE\"";
+
+	for (const role of ["director", "worker"]) {
+		it(`${role}: registers no tools or hooks`, () => {
+			const restore = preserveEnv();
+			try {
+				process.env.JING_ROLE = role;
+				const pi = mockPi();
+				backgroundExtension(pi as any);
+				assert.equal(pi.tools.size, 0);
+				assert.equal(pi.hooks.size, 0);
+			} finally {
+				restore();
+			}
+		});
+	}
+
+	it("executive: registers only shell tools and removes JING_TOKEN from tasks", async () => {
+		const restore = preserveEnv();
+		try {
+			process.env.JING_ROLE = "executive";
+			process.env.JING_TOKEN = "secret";
+			process.env.JING_NODE = "n1";
+			const pi = mockPi();
+			backgroundExtension(pi as any);
+			assert.deepEqual([...pi.tools.keys()], ["bg_run", "bg_logs", "bg_kill"]);
+			assert.deepEqual(pi.tools.get("bg_run").promptGuidelines, [
+				"Before blocking work, start long commands with bg_run, all in the same turn.",
+				"Never wait by polling; completion wakes you.",
+			]);
+			assert.doesNotMatch(JSON.stringify([...pi.tools.values()]), /subagent/i);
+			const ctx = mockCtx(tmp());
+			const res = await pi.tools.get("bg_run").execute("1", { command }, undefined, undefined, ctx);
+			const task = shell.tasks.get(res.details.id)!;
+			await until(() => task.status !== "running");
+			assert.equal(task.status, "completed");
+			assert.equal(readTail(task.logPath).text, "unset|n1");
+		} finally {
+			restore();
+		}
+	});
+
+	it("unset: registers all tools and preserves JING_TOKEN in tasks", async () => {
+		const restore = preserveEnv();
+		try {
+			delete process.env.JING_ROLE;
+			process.env.JING_TOKEN = "secret";
+			process.env.JING_NODE = "n1";
+			const pi = mockPi();
+			backgroundExtension(pi as any);
+			assert.deepEqual([...pi.tools.keys()], ["bg_run", "bg_logs", "bg_kill", "subagent"]);
+			assert.equal(pi.tools.get("bg_run").promptGuidelines, undefined);
+			const ctx = mockCtx(tmp());
+			const res = await pi.tools.get("bg_run").execute("1", { command }, undefined, undefined, ctx);
+			const task = shell.tasks.get(res.details.id)!;
+			await until(() => task.status !== "running");
+			assert.equal(task.status, "completed");
+			assert.equal(readTail(task.logPath).text, "secret|n1");
+		} finally {
+			restore();
+		}
 	});
 });
 

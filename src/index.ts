@@ -22,6 +22,9 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	// A subagent's session loads this extension too. It must not take over the
 	// shared host (wake-ups and the footer belong to the parent), and it gets no tools.
 	if (agents.buildingChild()) return;
+	const role = process.env.JING_ROLE;
+	if (role === "director" || role === "worker" || role === "agent") return;
+	const executive = role === "executive";
 	host.pi = pi;
 	host.counts = jobs.counts;
 	const bind = (ctx: ExtensionContext) => void (host.ctx = ctx);
@@ -52,6 +55,14 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bg_run",
 		label: "Background Run",
+		...(executive
+			? {
+					promptGuidelines: [
+						"Before blocking work, start long commands with bg_run, all in the same turn.",
+						"Never wait by polling; completion wakes you.",
+					],
+				}
+			: {}),
 		description:
 			"Start a shell command in the background and keep working. Use it for anything that would block you longer than a few seconds and whose output you do not need for your very next step: builds, test suites, installs, downloads, servers. Start these before work that must block. Returns taskId and logPath at once. When the command exits, a follow-up turn wakes you with the exit code and an output tail, so never sleep, poll, or spin on bg_logs. A standing daemon takes notifyOnCompletion: false. Before you report done, every task you started must have exited and been checked.",
 		promptSnippet: "Start a long shell command in the background; a follow-up turn wakes on exit.",
@@ -77,9 +88,12 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bg_logs",
 		label: "Background Status & Logs",
-		description:
-			"List background tasks and subagents, or read one by id: a shell task's output tail, or a subagent's full report. Use it when a wake-up told you something finished and you need more than the preview, or when fresh state is needed for a control decision. It is not a way to wait: reading a finished task marks it read and cancels its wake-up; reading a running one only shows progress so far.",
-		promptSnippet: "List background tasks and subagents, or read one's output or report by id.",
+		description: executive
+			? "List background tasks, or read one by id to see a shell task's output tail. Use it when a wake-up told you something finished and you need more than the preview, or when fresh state is needed for a control decision. It is not a way to wait: reading a finished task marks it read and cancels its wake-up; reading a running one only shows progress so far."
+			: "List background tasks and subagents, or read one by id: a shell task's output tail, or a subagent's full report. Use it when a wake-up told you something finished and you need more than the preview, or when fresh state is needed for a control decision. It is not a way to wait: reading a finished task marks it read and cancels its wake-up; reading a running one only shows progress so far.",
+		promptSnippet: executive
+			? "List background tasks, or read one's output by id."
+			: "List background tasks and subagents, or read one's output or report by id.",
 		parameters: Type.Object({
 			taskId: Type.Optional(Type.String({ description: "Task id or unique prefix. Omit to list all." })),
 			tailLines: Type.Optional(Type.Number({ description: "Shell output lines to return (default 80)." })),
@@ -98,9 +112,10 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bg_kill",
 		label: "Background Kill",
-		description:
-			"Stop a running background task (its whole process group) or subagent by id. Use it when the work is no longer needed, has run away, or must be abandoned before you report. Killing never wakes a turn; partial output stays readable with bg_logs.",
-		promptSnippet: "Stop a running background task or subagent by id.",
+		description: executive
+			? "Stop a running background task (its whole process group) by id. Use it when the work is no longer needed, has run away, or must be abandoned before you report. Killing never wakes a turn; partial output stays readable with bg_logs."
+			: "Stop a running background task (its whole process group) or subagent by id. Use it when the work is no longer needed, has run away, or must be abandoned before you report. Killing never wakes a turn; partial output stays readable with bg_logs.",
+		promptSnippet: executive ? "Stop a running background task by id." : "Stop a running background task or subagent by id.",
 		parameters: Type.Object({ taskId: Type.String({ description: "Task id or unique prefix." }) }),
 		async execute(_id: string, p: any, _s: unknown, _u: unknown, ctx: ExtensionContext) {
 			bind(ctx);
@@ -110,7 +125,7 @@ export default function backgroundExtension(pi: ExtensionAPI) {
 		},
 	} as any);
 
-	pi.registerTool({
+	if (!executive) pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: SUBAGENT_DESCRIPTION,

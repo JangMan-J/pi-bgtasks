@@ -171,8 +171,10 @@ export function start(ctx: ExtensionContext, o: StartOptions): ShellTask {
 	const logPath = join(logDir(), `${id}.log`);
 	const fd = openSync(logPath, "a", 0o600);
 	let proc: ChildProcess;
+	const env = process.env.JING_ROLE === "executive" ? { ...process.env } : undefined;
+	if (env) delete env.JING_TOKEN;
 	try {
-		proc = spawn("bash", ["-lc", command], { cwd, detached: true, stdio: ["ignore", fd, fd] });
+		proc = spawn("bash", ["-lc", command], { cwd, detached: true, stdio: ["ignore", fd, fd], ...(env ? { env } : {}) });
 	} finally {
 		closeSync(fd);
 	}
